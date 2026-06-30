@@ -6,6 +6,7 @@
 import { MAX_PINNED_PROJECTS, type ProjectId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { normalizePinnedIds, pinId, prunePinnedIds, unpinId } from "./pinning.logic";
 
 interface PinnedProjectsStoreState {
@@ -78,4 +79,9 @@ export const usePinnedProjectsStore = create<PinnedProjectsStoreState>()(
       },
     },
   ),
+);
+
+// Reset on host switch — pinned ids reference one host's projects/threads.
+registerHostScopedReset(() =>
+  usePinnedProjectsStore.setState(usePinnedProjectsStore.getInitialState(), true),
 );

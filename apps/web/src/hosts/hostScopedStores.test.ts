@@ -12,4 +12,14 @@ describe("hostScopedStores", () => {
     expect(a).toBe(1);
     expect(b).toBe(1);
   });
+
+  it("runs remaining resets even when one reset throws", () => {
+    let count = 0;
+    registerHostScopedReset(() => {
+      throw new Error("boom");
+    });
+    registerHostScopedReset(() => (count += 1));
+    resetAllHostScopedStores();
+    expect(count).toBe(1);
+  });
 });
