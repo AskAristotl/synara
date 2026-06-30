@@ -37,9 +37,7 @@ export const SubAgentSpawnInput = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   role: Schema.optional(TrimmedNonEmptyString),
   nickname: Schema.optional(TrimmedNonEmptyString),
-  workspace: Schema.optional(SubAgentWorkspaceMode).pipe(
-    Schema.withDecodingDefault(() => "share"),
-  ),
+  workspace: Schema.optional(SubAgentWorkspaceMode).pipe(Schema.withDecodingDefault(() => "share")),
   includeWip: Schema.optional(Schema.Boolean).pipe(Schema.withDecodingDefault(() => false)),
   approval: Schema.optional(SubAgentApprovalMode).pipe(Schema.withDecodingDefault(() => "auto")),
   attachParentContext: Schema.optional(Schema.Boolean).pipe(
