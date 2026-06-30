@@ -31,6 +31,8 @@ import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReap
 import { Server } from "./effectServer";
 import { ServerLoggerLive } from "./serverLogger";
 import { formatHostForUrl, isWildcardHost } from "./startupAccess";
+import { formatStartupPairingBanner, renderPairingQr } from "./startupPairingBanner";
+import { ServerAuth } from "./auth/Services/ServerAuth";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
@@ -318,6 +320,21 @@ const makeServerProgram = (input: CliInput) =>
       devUrl: devUrl?.toString(),
       authEnabled: Boolean(authToken),
     });
+
+    // Headless pairing surface: when the server is remote-reachable (no
+    // loopback/desktop-managed/no-auth guard), print a pairing link + QR so a
+    // new device can be paired without a local browser session. Never let a
+    // pairing-issue or QR-render failure abort startup.
+    yield* Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const descriptor = yield* serverAuth.getDescriptor();
+      if (descriptor.policy === "remote-reachable") {
+        const baseUrl = bindUrl;
+        const pairingUrl = yield* serverAuth.issueStartupPairingUrl(baseUrl);
+        const qr = yield* Effect.promise(() => renderPairingQr(pairingUrl));
+        yield* Effect.logInfo(formatStartupPairingBanner({ pairingUrl, qr }));
+      }
+    }).pipe(Effect.ignoreCause({ log: true }));
 
     if (!config.noBrowser) {
       const target = config.devUrl?.toString() ?? bindUrl;
