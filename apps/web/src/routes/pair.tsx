@@ -4,13 +4,12 @@
 // Layer: Route
 // Exports: Route
 
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { pairRedeemFromLocation } from "./pairRedeem";
+import { pairRedeemFromLocation } from "./-pairRedeem";
 
 function PairView() {
-  const navigate = useNavigate();
   const [status, setStatus] = useState<"pairing" | "error">("pairing");
   const [message, setMessage] = useState("Pairing this device…");
 
@@ -29,7 +28,7 @@ function PairView() {
     return () => {
       cancelled = true;
     };
-  }, [navigate]);
+  }, []);
 
   return (
     <div className="flex h-dvh items-center justify-center p-6 text-center">

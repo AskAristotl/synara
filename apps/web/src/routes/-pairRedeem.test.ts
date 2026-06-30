@@ -1,4 +1,4 @@
-// apps/web/src/routes/pairRedeem.test.ts
+// apps/web/src/routes/-pairRedeem.test.ts
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Node has no global `localStorage`, and zustand's `createJSONStorage` resolves
@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 // pairing.test.ts for the same pattern). Stub a working in-memory localStorage
 // once, then dynamically import the store + module under test so they capture it.
 let useHostStore: typeof import("../hosts/hostStore").useHostStore;
-let pairRedeemFromLocation: typeof import("./pairRedeem").pairRedeemFromLocation;
+let pairRedeemFromLocation: typeof import("./-pairRedeem").pairRedeemFromLocation;
 
 beforeAll(async () => {
   const entries = new Map<string, string>();
@@ -27,7 +27,7 @@ beforeAll(async () => {
     },
   });
   ({ useHostStore } = await import("../hosts/hostStore"));
-  ({ pairRedeemFromLocation } = await import("./pairRedeem"));
+  ({ pairRedeemFromLocation } = await import("./-pairRedeem"));
 });
 
 afterAll(() => {

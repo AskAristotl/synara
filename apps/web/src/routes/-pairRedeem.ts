@@ -1,5 +1,5 @@
-// apps/web/src/routes/pairRedeem.ts
-// FILE: pairRedeem.ts
+// apps/web/src/routes/-pairRedeem.ts
+// FILE: -pairRedeem.ts
 // Purpose: Redeem a pairing link from the current URL and activate the host.
 // Layer: Web route logic
 // Exports: pairRedeemFromLocation
