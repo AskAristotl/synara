@@ -6,7 +6,7 @@
 ## 1. Goal
 
 Let a running provider session in Synara (Claude, Codex, Cursor, …) **delegate
-bounded tasks to sub-agents of *other* providers** and collect structured
+bounded tasks to sub-agents of _other_ providers** and collect structured
 results — e.g. Claude spins up a Codex sub-agent to validate its work, or a
 Cursor (Composer) sub-agent for fast implementation, and vice-versa. Modeled on
 Traycer's cross-model agent orchestration, but built on Synara's existing
@@ -18,7 +18,7 @@ These were resolved during the grilling session and are binding for v1.
 
 1. **Core primitive = message-passing; delegation is the first workflow on top.**
    We build the agent→agent message primitive (a message becomes a turn on a
-   target thread) and ship *delegation* (spawn + task + collect result) as the
+   target thread) and ship _delegation_ (spawn + task + collect result) as the
    first consumer. Free-form peer messaging is an explicit v2 layer that reuses
    the same primitive.
 2. **Invocation surface = MCP.** A Synara-owned MCP server exposes tools
@@ -27,10 +27,10 @@ These were resolved during the grilling session and are binding for v1.
    results are structured (ideal for delegation).
 3. **Result delivery = non-blocking `spawn_agent` + blocking `wait`.**
    `spawn_agent` returns a handle immediately; `wait([handles])` blocks until
-   results arrive. Enables parallel fan-out. The parent stays *parked on `wait`*,
+   results arrive. Enables parallel fan-out. The parent stays _parked on `wait`_,
    so **no mid-turn inbound injection is needed in v1**.
 4. **A sub-agent is a real child `OrchestrationThread`** reusing the full
-   provider/session/turn/event machinery, linked via the *already-present*
+   provider/session/turn/event machinery, linked via the _already-present_
    `parentThreadId` / `subagentAgentId` / `subagentRole` / `subagentNickname`
    fields on `ThreadCreateCommand` / `OrchestrationThread`. A compact subagent
    block in the parent conversation is the at-a-glance view.
@@ -88,7 +88,7 @@ These were resolved during the grilling session and are binding for v1.
 ### 3.2 Why one HTTP MCP transport (not in-process JS)
 
 The Claude Agent SDK accepts an in-process MCP server object, but Codex
-(app-server) and Cursor (ACP) are *separate processes* that can only attach to
+(app-server) and Cursor (ACP) are _separate processes_ that can only attach to
 an MCP server over a transport (HTTP/stdio). To keep **one tool implementation**
 and a uniform identity story, the MCP server is served over a **single local
 HTTP endpoint** that every provider session is configured to connect to. Each
@@ -100,7 +100,7 @@ via ACP MCP config).
 ### 3.3 Identity & addressing
 
 - The **caller's** identity is its own `threadId`, resolved from the bearer token
-  — the orchestrator never trusts a client-supplied agent id for the *caller*.
+  — the orchestrator never trusts a client-supplied agent id for the _caller_.
 - `spawn_agent` mints the child `threadId` and returns it as the **handle**
   (also surfaced as `subagentAgentId`). `wait`, `send_message`, and `stop_agent`
   take handles. The orchestrator authorizes that the handle is a child of the
@@ -113,13 +113,14 @@ via ACP MCP config).
 type SubAgentStatus = "completed" | "failed" | "interrupted" | "timeout" | "running";
 
 interface SubAgentResult {
-  agentId: string;        // child threadId
-  threadId: string;       // same as agentId; explicit for clarity
+  agentId: string; // child threadId
+  threadId: string; // same as agentId; explicit for clarity
   provider: ProviderKind;
   model: string | null;
   status: SubAgentStatus;
-  finalMessage: string;   // child's last assistant message (may be partial on failure)
-  diff: {                 // present for isolated writers that produced a checkpoint
+  finalMessage: string; // child's last assistant message (may be partial on failure)
+  diff: {
+    // present for isolated writers that produced a checkpoint
     branch: string;
     filesChanged: number;
     summary: string;
@@ -163,16 +164,16 @@ stop_agent(input: { agentId: string }): { ok: true }
 
 ### 3.6 Mapping to existing commands
 
-| Tool action | Existing mechanism |
-|---|---|
-| create child thread | `ThreadCreateCommand` with `parentThreadId`, `subagentAgentId`, `subagentRole`, `subagentNickname`, `envMode`, `worktreePath` |
-| start the task turn | `ThreadTurnStartCommand` (→ `ProviderRuntimeIngestion` → `ProviderService.sendTurn`) |
-| follow-up (`send_message`) | `ThreadTurnStartCommand` on the idle child thread |
-| stop (`stop_agent`, cascade) | `ThreadTurnInterruptCommand` + `ThreadSessionStopCommand` |
-| approvals (`auto`) | server auto-emits `ThreadApprovalRespondCommand` per policy |
-| worktree provisioning | `GitManager.createWorktree` (+ WIP snapshot for `includeWip`) |
-| result `finalMessage` | last assistant message from projection |
-| result `diff` | `thread.turn.diff.complete` payload (`files`, `checkpointRef`, branch) |
+| Tool action                  | Existing mechanism                                                                                                            |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| create child thread          | `ThreadCreateCommand` with `parentThreadId`, `subagentAgentId`, `subagentRole`, `subagentNickname`, `envMode`, `worktreePath` |
+| start the task turn          | `ThreadTurnStartCommand` (→ `ProviderRuntimeIngestion` → `ProviderService.sendTurn`)                                          |
+| follow-up (`send_message`)   | `ThreadTurnStartCommand` on the idle child thread                                                                             |
+| stop (`stop_agent`, cascade) | `ThreadTurnInterruptCommand` + `ThreadSessionStopCommand`                                                                     |
+| approvals (`auto`)           | server auto-emits `ThreadApprovalRespondCommand` per policy                                                                   |
+| worktree provisioning        | `GitManager.createWorktree` (+ WIP snapshot for `includeWip`)                                                                 |
+| result `finalMessage`        | last assistant message from projection                                                                                        |
+| result `diff`                | `thread.turn.diff.complete` payload (`files`, `checkpointRef`, branch)                                                        |
 
 ### 3.7 Governance & safety
 
@@ -197,10 +198,10 @@ stop_agent(input: { agentId: string }): { ok: true }
 
 ## 5. Risks & mitigations
 
-| Risk | Mitigation |
-|---|---|
-| Parent provider tool-call timeout < child runtime | `wait` returns `status:"running"` + handle before the parent's own timeout; caller re-`wait`s |
-| Full-access child in a *shared* cwd runs destructive shell | Document clearly; `read-only` knob; default writers to `worktree` in guidance |
-| Worktree accumulation | persist-until-explicit-cleanup + a `cleanup` path; out-of-scope auto-GC noted |
-| MCP token leakage between sessions | per-session random bearer token, server-side map, never client-trusted for caller identity |
-| Codex/Cursor MCP config differences | single HTTP transport; per-adapter config shim verified by an integration test each |
+| Risk                                                       | Mitigation                                                                                    |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Parent provider tool-call timeout < child runtime          | `wait` returns `status:"running"` + handle before the parent's own timeout; caller re-`wait`s |
+| Full-access child in a _shared_ cwd runs destructive shell | Document clearly; `read-only` knob; default writers to `worktree` in guidance                 |
+| Worktree accumulation                                      | persist-until-explicit-cleanup + a `cleanup` path; out-of-scope auto-GC noted                 |
+| MCP token leakage between sessions                         | per-session random bearer token, server-side map, never client-trusted for caller identity    |
+| Codex/Cursor MCP config differences                        | single HTTP transport; per-adapter config shim verified by an integration test each           |

@@ -25,11 +25,13 @@
 ### Task 0.1: Sub-agent MCP I/O + result-envelope schemas
 
 **Files:**
+
 - Create: `packages/contracts/src/subagent.ts`
 - Modify: `packages/contracts/src/index.ts` (re-export; match existing barrel style)
 - Test: `packages/contracts/src/subagent.test.ts`
 
 **Interfaces:**
+
 - Produces: `SubAgentSpawnInput`, `SubAgentWaitInput`, `SubAgentSendMessageInput`, `SubAgentStopInput`, `SubAgentResult`, `SubAgentStatus`, `SubAgentWorkspaceMode` (`"share"|"worktree"`), `SubAgentApprovalMode` (`"auto"|"ask-human"|"read-only"`). Field shapes exactly per spec §3.4–3.5.
 
 - [ ] **Step 1: Write failing decode/encode tests** for each schema (valid sample round-trips; `workspace` defaults to `"share"`, `approval` defaults to `"auto"`, `attachParentContext`/`includeWip` default `false`, `wait.mode` defaults `"all"`). Mirror the `Schema.withDecodingDefault` pattern used in `orchestration.ts`.
@@ -41,11 +43,13 @@
 ### Task 0.2: Shared constants + handle helpers
 
 **Files:**
+
 - Create: `packages/shared/src/subagent/index.ts` (subpath export `@t3tools/shared/subagent`)
 - Modify: `packages/shared/package.json` exports map (follow existing subpath-export style)
 - Test: `packages/shared/src/subagent/index.test.ts`
 
 **Interfaces:**
+
 - Produces: `SUBAGENT_MAX_LIVE_PER_ROOT = 6`, `SUBAGENT_WAIT_MAX_SECONDS = 600`, `clampWaitSeconds(n: number): number`, `isTerminalStatus(s: SubAgentStatus): boolean`.
 
 - [ ] **Step 1: Write failing tests** — `clampWaitSeconds(99999) === 600`, `clampWaitSeconds(0) === 600` (fallback to default), `isTerminalStatus("running") === false`, `isTerminalStatus("completed") === true`.
@@ -63,11 +67,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 1.1: SubAgentOrchestrator — spawn (share-cwd)
 
 **Files:**
+
 - Create: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts`
 - Create: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.ts`
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
 
 **Interfaces:**
+
 - Consumes: `OrchestrationEngineService` (`.dispatch`, `.streamDomainEvents`), `ProjectionSnapshotQuery` (read child state), `ProviderDiscovery` (validate provider). Mirror the service/layer split used by existing `orchestration/Layers/*`.
 - Produces: `SubAgentOrchestratorShape` with:
   - `spawn(caller: { threadId; projectId; cwd; canSpawn }, input: SubAgentSpawnInput): Effect<{ agentId: ThreadId }, SubAgentError>`
@@ -82,11 +88,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 1.2: SubAgentOrchestrator — wait (terminal collection)
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts`
 - Modify: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.ts`
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
 
 **Interfaces:**
+
 - Produces: `wait(caller, input: SubAgentWaitInput): Effect<readonly SubAgentResult[], SubAgentError>`.
 - Consumes: `OrchestrationEngineService.streamDomainEvents` to await each child reaching a terminal session status; `ProjectionSnapshotQuery.getThreadShellById` / snapshot to read `finalMessage`, provider, model.
 
@@ -99,10 +107,12 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 1.3: Register the orchestrator layer in the server composition
 
 **Files:**
+
 - Modify: `apps/server/src/wsRpc.ts` (or the server layer root that provides orchestration services — follow where `OrchestrationEngineService`/`ProviderService` are provided)
 - Test: extend `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts` with a layer-provision smoke test.
 
 **Interfaces:**
+
 - Produces: `SubAgentOrchestrator` available in the server's Effect context.
 
 - [ ] **Step 1: Write failing test** that builds the server layer and `yield* SubAgentOrchestrator` resolves.
@@ -118,10 +128,12 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 2.1: Session token registry
 
 **Files:**
+
 - Create: `apps/server/src/subagentMcp/SessionTokenRegistry.ts`
 - Test: `apps/server/src/subagentMcp/SessionTokenRegistry.test.ts`
 
 **Interfaces:**
+
 - Produces: `issueToken(threadId, { canSpawn: boolean }): string`, `resolve(token): { threadId; canSpawn } | null`, `revoke(threadId): void`. Random opaque tokens; never derivable from threadId.
 
 - [ ] **Step 1: Write failing tests** — issued token resolves to the right threadId + `canSpawn`; revoked token resolves to `null`; two threads get distinct tokens.
@@ -130,11 +142,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 2.2: MCP server exposing the four tools over HTTP
 
 **Files:**
+
 - Create: `apps/server/src/subagentMcp/SubAgentMcpServer.ts` (MCP server: tool defs + handlers calling `SubAgentOrchestrator`)
 - Create: `apps/server/src/subagentMcp/httpTransport.ts` (mount streamable-HTTP MCP on the existing HTTP server; auth via `Authorization: Bearer <token>` → `SessionTokenRegistry.resolve`)
 - Test: `apps/server/src/subagentMcp/SubAgentMcpServer.test.ts`
 
 **Interfaces:**
+
 - Consumes: `SubAgentOrchestrator`, `SessionTokenRegistry`.
 - Produces: tools `spawn_agent`, `wait`, `send_message`, `stop_agent` whose input schemas equal the Phase-0 contracts; handlers resolve the caller from the bearer token and call the orchestrator; tool errors returned as MCP `isError` content, not thrown.
 
@@ -148,11 +162,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 3.1: Carry MCP config through session start
 
 **Files:**
+
 - Modify: `packages/contracts/src/provider.ts` (`ProviderSessionStartInput`: add optional `subagentMcp?: { url: string; token: string }`)
 - Modify: `apps/server/src/provider/Services/ProviderService.ts` (issue a token via `SessionTokenRegistry` at session start when the thread is human-initiated → `canSpawn:true`, else `canSpawn:false`; pass `subagentMcp` to the adapter)
 - Test: `apps/server/src/provider/Services/ProviderService.test.ts` (or nearest existing)
 
 **Interfaces:**
+
 - Produces: every `startSession` receives `subagentMcp` with a token whose `canSpawn` reflects depth-1.
 
 - [ ] **Step 1: Write failing test** — starting a session for a root thread issues a `canSpawn:true` token and forwards `subagentMcp`; starting a session for a thread with `parentThreadId` issues `canSpawn:false`.
@@ -161,6 +177,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 3.2: Claude adapter — register the MCP server
 
 **Files:**
+
 - Modify: `apps/server/src/provider/Layers/ClaudeAdapter.ts` (add `subagentMcp` to `options.mcpServers` as an HTTP MCP server when present)
 - Test: `apps/server/src/provider/Layers/ClaudeAdapter.test.ts`
 
@@ -170,6 +187,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 3.3: Codex adapter — register the MCP server
 
 **Files:**
+
 - Modify: `apps/server/src/provider/Layers/CodexAdapter.ts` (inject MCP server into app-server session config)
 - Test: `apps/server/src/provider/Layers/CodexAdapter.test.ts`
 
@@ -179,6 +197,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 3.4: Cursor adapter — register the MCP server
 
 **Files:**
+
 - Modify: `apps/server/src/provider/Layers/CursorAdapter.ts` (ACP MCP config)
 - Test: `apps/server/src/provider/Layers/CursorAdapter.test.ts`
 
@@ -194,11 +213,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 4.1: Worktree provisioning on spawn (`workspace:"worktree"`)
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts`
 - Modify: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.ts`
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
 
 **Interfaces:**
+
 - Consumes: `GitManager.createWorktree` (verified to exist at `apps/server/src/git/Layers/GitManager.ts`).
 
 - [ ] **Step 1: Write failing test** — `spawn(..., { workspace:"worktree" })` calls `GitManager.createWorktree` branching from the parent repo HEAD, and the dispatched `thread.create` has `envMode:"worktree"` + the returned `worktreePath` + `branch`.
@@ -207,6 +228,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 4.2: `includeWip` — snapshot parent dirty tree onto the child branch
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts`
 - Possibly Modify: `apps/server/src/git/Services/GitCore.ts` + `Layers/GitCore.ts` (add a `snapshotWorkingTreeToBranch` primitive if not already expressible)
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`, `apps/server/src/git/Layers/GitCore.test.ts`
@@ -217,6 +239,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 4.3: Populate `diff` in the result envelope
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts` (`wait` builder)
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
 
@@ -230,6 +253,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 5.1: Approval policy resolution (`auto` / `read-only` / `ask-human`)
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts` (set child `runtimeMode`/approval policy from `input.approval`)
 - Create: `apps/server/src/orchestration/Services/SubAgentApprovalResolver.ts` (auto-responder)
 - Modify: the approval-request reactor (where `thread.approval-response-requested` is handled) to auto-emit `ThreadApprovalRespondCommand` for sub-agent threads whose policy is `auto`/`read-only`
@@ -241,6 +265,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 5.2: Depth-1 + concurrency cap enforcement
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts`
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
 
@@ -250,6 +275,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 5.3: Cascade-stop children on parent stop
 
 **Files:**
+
 - Modify: the handler for `thread.session.stop` / `thread.turn.interrupt` (parent path) to enumerate + stop live children
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts` (`stop(agentId)` helper, reused)
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`
@@ -264,11 +290,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 6.1: `send_message` (follow-up turn to a child) + `stop_agent`
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Services/SubAgentOrchestrator.ts` (`sendMessage`, `stop`)
 - Modify: `apps/server/src/subagentMcp/SubAgentMcpServer.ts` (already-registered tools call through)
 - Test: `apps/server/src/orchestration/Layers/SubAgentOrchestrator.test.ts`, `apps/server/src/subagentMcp/SubAgentMcpServer.test.ts`
 
 **Interfaces:**
+
 - Produces: `sendMessage(caller, { agentId, task })` dispatches `ThreadTurnStartCommand` on the idle child (authorizing the child belongs to caller); `stop(caller, { agentId })` interrupts+stops.
 
 - [ ] **Step 1: Write failing tests** — `send_message` to a child the caller spawned starts a new turn on that child; `send_message` to a non-child → `SubAgentError("not-owner")`; `stop_agent` interrupts+stops a running child.
@@ -277,6 +305,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 6.2: Provider availability errors + `wait` timeout semantics surfaced as tool results
 
 **Files:**
+
 - Modify: `apps/server/src/subagentMcp/SubAgentMcpServer.ts` (map `SubAgentError` variants → structured MCP tool errors; `status:"running"` returned, not an error)
 - Test: `apps/server/src/subagentMcp/SubAgentMcpServer.test.ts`
 
@@ -290,11 +319,13 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 7.1: Sub-agent block in the parent conversation
 
 **Files:**
+
 - Create: `apps/web/src/components/conversation/SubAgentBlock.tsx`
 - Modify: the parent conversation renderer to show a block per child (status chip + provider/model + nickname/role + link to the child thread), driven by existing `parentThreadId`/`subagentAgentId` projection data
 - Test: `apps/web/src/components/conversation/SubAgentBlock.test.tsx`
 
 **Interfaces:**
+
 - Consumes: child thread shells (already in the read model) filtered by `parentThreadId === currentThreadId`.
 
 - [ ] **Step 1: Write failing test** — renders one block per child with the child's status and a link to its thread; updates status on prop change.
@@ -306,6 +337,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 7.2: Child thread surfacing in the sidebar
 
 **Files:**
+
 - Modify: `apps/web/src/components/Sidebar.tsx` (nest children under their parent, or tag them with their role/provider)
 - Test: `apps/web/src/components/Sidebar.test.tsx` (or nearest existing)
 
@@ -319,6 +351,7 @@ This phase proves the command-mapping vertical slice using the in-process engine
 ### Task 8.1: Cross-model delegation integration test
 
 **Files:**
+
 - Create: `apps/server/src/subagentMcp/crossModel.integration.test.ts`
 
 - [ ] **Step 1: Write a failing integration test** that, with stubbed provider adapters, drives: a root (Claude-stub) session calls `spawn_agent({provider:"codex", task, workspace:"share"})` over the MCP HTTP endpoint → child thread created + turn started → child-stub completes → root calls `wait` → receives a `completed` envelope with `finalMessage`. Then a second spawn with `workspace:"worktree"` returns a `diff` envelope.
