@@ -25,6 +25,7 @@ interface ProjectRunStoreState {
 }
 
 import { create } from "zustand";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 function indexByProjectId(
   servers: ReadonlyArray<ProjectDevServer>,
@@ -59,3 +60,8 @@ export const useProjectRunStore = create<ProjectRunStoreState>((set) => ({
       return { runsByProjectId: nextRunsByProjectId };
     }),
 }));
+
+// Reset to initial state on host switch; dev-server registry is keyed by project id, which is host-specific.
+registerHostScopedReset(() =>
+  useProjectRunStore.setState(useProjectRunStore.getInitialState(), true),
+);

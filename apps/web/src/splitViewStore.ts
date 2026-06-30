@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { type ChatRightPanel } from "./diffRouteSearch";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { randomUUID } from "./lib/utils";
 import {
   canSubdividePane,
@@ -787,4 +788,9 @@ export const useSplitViewStore = create<SplitViewStore>()(
       },
     },
   ),
+);
+
+// Reset to initial state on host switch; split views reference thread ids that only exist on one host.
+registerHostScopedReset(() =>
+  useSplitViewStore.setState(useSplitViewStore.getInitialState(), true),
 );

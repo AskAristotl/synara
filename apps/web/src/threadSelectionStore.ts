@@ -7,6 +7,7 @@
 
 import type { ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 export interface ThreadSelectionState {
   /** Currently selected thread IDs. */
@@ -122,3 +123,8 @@ export const useThreadSelectionStore = create<ThreadSelectionStore>((set, get) =
 
   hasSelection: () => get().selectedThreadIds.size > 0,
 }));
+
+// Reset to initial state on host switch; selected thread IDs only resolve on one host.
+registerHostScopedReset(() =>
+  useThreadSelectionStore.setState(useThreadSelectionStore.getInitialState(), true),
+);

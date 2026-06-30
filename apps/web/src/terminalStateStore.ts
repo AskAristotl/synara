@@ -9,6 +9,7 @@ import { type TerminalActivityState, type TerminalCliKind } from "@t3tools/share
 import type { ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import {
   DEFAULT_THREAD_TERMINAL_HEIGHT,
   DEFAULT_THREAD_TERMINAL_ID,
@@ -1406,4 +1407,9 @@ export const useTerminalStateStore = create<TerminalStateStoreState>()(
       }),
     },
   ),
+);
+
+// Reset to initial state on host switch; terminal state is keyed by thread, which is host-specific.
+registerHostScopedReset(() =>
+  useTerminalStateStore.setState(useTerminalStateStore.getInitialState(), true),
 );
