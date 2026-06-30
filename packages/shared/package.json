@@ -100,6 +100,10 @@
       "types": "./src/threadWorkspace.ts",
       "import": "./src/threadWorkspace.ts"
     },
+    "./subagent": {
+      "types": "./src/subagent.ts",
+      "import": "./src/subagent.ts"
+    },
     "./subagents": {
       "types": "./src/subagents.ts",
       "import": "./src/subagents.ts"
