@@ -9,6 +9,8 @@ import {
 import { DateTime, Effect, Schema } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
+import { appCorsHeaders } from "../appCors";
+import type { ServerConfigShape } from "../config";
 import {
   AuthError,
   type AuthRequest,
@@ -30,6 +32,7 @@ export interface AuthHttpRouteOptions {
   readonly respond: Respond;
   readonly serverAuth: ServerAuthShape;
   readonly sessionCredentials: Pick<SessionCredentialServiceShape, "cookieName">;
+  readonly config: ServerConfigShape;
 }
 
 const decodeBootstrapInput = Schema.decodeUnknownEffect(AuthBootstrapInput);
@@ -199,10 +202,28 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
   const authRequest = makeNodeAuthRequest({ req: input.req, url: input.url });
   const headers = authRequest.headers;
 
+  // Every /api/auth/* response must carry CORS headers for trusted
+  // cross-origin callers (e.g. the desktop app at t3://app reaching a remote
+  // host). Computed up front so it covers every branch below, including the
+  // AuthError/Not Found fallbacks, and OPTIONS preflight short-circuits
+  // before any auth logic runs.
+  const cors = appCorsHeaders({
+    rawOrigin: headers.origin,
+    requestOrigin: input.url.origin,
+    config: input.config,
+  });
+  const respond: Respond = (statusCode, responseHeaders, body) =>
+    input.respond(statusCode, { ...cors, ...responseHeaders }, body);
+
+  if (method === "OPTIONS") {
+    respond(204, {});
+    return true;
+  }
+
   const route = Effect.gen(function* () {
     if (method === "GET" && input.url.pathname === "/api/auth/session") {
       const session = yield* input.serverAuth.getSessionState(authRequest);
-      respondJson(input.respond, 200, session);
+      respondJson(respond, 200, session);
       return;
     }
 
@@ -225,7 +246,7 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         payload.credential,
         deriveRequestClientMetadata(input.req),
       );
-      respondJson(input.respond, 200, result.response, {
+      respondJson(respond, 200, result.response, {
         "Set-Cookie": encodeCookie({
           name: input.sessionCredentials.cookieName,
           value: result.sessionToken,
@@ -254,14 +275,14 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         payload.credential,
         deriveRequestClientMetadata(input.req),
       );
-      respondJson(input.respond, 200, result);
+      respondJson(respond, 200, result);
       return;
     }
 
     if (method === "POST" && input.url.pathname === "/api/auth/ws-token") {
       const session = yield* input.serverAuth.authenticateHttpRequest(authRequest);
       const result = yield* input.serverAuth.issueWebSocketToken(session);
-      respondJson(input.respond, 200, result);
+      respondJson(respond, 200, result);
       return;
     }
 
@@ -290,14 +311,14 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
           )
         : {};
       const result = yield* input.serverAuth.issuePairingCredential(payload);
-      respondJson(input.respond, 200, result);
+      respondJson(respond, 200, result);
       return;
     }
 
     if (method === "GET" && input.url.pathname === "/api/auth/pairing-links") {
       yield* authenticateOwnerSession({ serverAuth: input.serverAuth, authRequest });
       const pairingLinks = yield* input.serverAuth.listPairingLinks();
-      respondJson(input.respond, 200, pairingLinks);
+      respondJson(respond, 200, pairingLinks);
       return;
     }
 
@@ -318,7 +339,7 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         ),
       );
       const revoked = yield* input.serverAuth.revokePairingLink(payload.id);
-      respondJson(input.respond, 200, { revoked });
+      respondJson(respond, 200, { revoked });
       return;
     }
 
@@ -328,7 +349,7 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         authRequest,
       });
       const clients = yield* input.serverAuth.listClientSessions(session.sessionId);
-      respondJson(input.respond, 200, clients);
+      respondJson(respond, 200, clients);
       return;
     }
 
@@ -355,7 +376,7 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         session.sessionId,
         payload.sessionId,
       );
-      respondJson(input.respond, 200, { revoked });
+      respondJson(respond, 200, { revoked });
       return;
     }
 
@@ -365,15 +386,13 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
         authRequest,
       });
       const revokedCount = yield* input.serverAuth.revokeOtherClientSessions(session.sessionId);
-      respondJson(input.respond, 200, { revokedCount });
+      respondJson(respond, 200, { revokedCount });
       return;
     }
 
-    input.respond(404, { "Content-Type": "text/plain" }, "Not Found");
+    respond(404, { "Content-Type": "text/plain" }, "Not Found");
   }).pipe(
-    Effect.catchTag("AuthError", (error) =>
-      Effect.sync(() => respondToAuthError(input.respond, error)),
-    ),
+    Effect.catchTag("AuthError", (error) => Effect.sync(() => respondToAuthError(respond, error))),
   );
 
   yield* route;
