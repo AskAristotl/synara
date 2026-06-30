@@ -65,7 +65,7 @@ describe("redeemPairingLink", () => {
       set: async (id: string, v: string) => void credStore.stored.set(id, v),
       delete: async (id: string) => void credStore.stored.delete(id),
     };
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
           authenticated: true,
@@ -85,5 +85,14 @@ describe("redeemPairingLink", () => {
     expect(host.baseUrl).toBe("https://studio.ts.net:3773");
     expect(credStore.stored.get(host.id)).toBe("BEARER_TOKEN");
     expect(useHostStore.getState().hosts.some((h) => h.id === host.id)).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://studio.ts.net:3773/api/auth/bootstrap/bearer",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "omit",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credential: "ABCD1234WXYZ" }),
+      }),
+    );
   });
 });
