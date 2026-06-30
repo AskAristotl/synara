@@ -1,7 +1,7 @@
 // FILE: toolCallLabel.ts
 // Purpose: Normalizes generic tool-call titles and humanizes command executions for timeline rows.
 // Layer: UI utility
-// Exports: deriveReadableToolTitle, deriveReadableCommandDisplay, isInspectCommand, deriveInlineCommandCall, normalizeCompactToolLabel, isGenericToolTitle
+// Exports: deriveReadableToolTitle, deriveReadableCommandDisplay, command icon classifiers, deriveInlineCommandCall, normalizeCompactToolLabel, isGenericToolTitle, extractWebFetchUrl
 // Depends on: @t3tools/contracts tool lifecycle item types
 
 import type { ToolLifecycleItemType } from "@t3tools/contracts";
@@ -10,6 +10,52 @@ export function normalizeCompactToolLabel(value: string): string {
   return value
     .replace(/\s+(?:complete|completed|done|finished|success|succeeded|started|running)\s*$/i, "")
     .trim();
+}
+
+// Web-fetch tool calls (e.g. Claude's `WebFetch`) arrive as generic dynamic tool
+// calls whose detail is the raw `ToolName: {json}` argument summary. Recognizing
+// them lets the timeline surface the target site (favicon + URL) instead of the
+// raw JSON arguments.
+const WEB_FETCH_TOOL_NAMES = new Set(["webfetch", "fetch", "urlfetch", "fetchurl", "httpfetch"]);
+
+function isWebFetchToolName(toolName: string | null | undefined): boolean {
+  if (!toolName) {
+    return false;
+  }
+  const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
+  if (WEB_FETCH_TOOL_NAMES.has(normalized)) {
+    return true;
+  }
+  return (
+    normalized.includes("fetch") &&
+    (normalized.includes("web") || normalized.includes("url") || normalized.includes("http"))
+  );
+}
+
+// Pulls the first http(s) URL out of a web-fetch tool call's argument summary.
+// Prefers the JSON `url`/`uri` field (the actual shape) and falls back to a bare
+// URL token so a slightly different summary still resolves. Returns null for
+// non-fetch tools or when no usable URL is present, so callers fall back to the
+// generic tool-call rendering.
+export function extractWebFetchUrl(input: {
+  readonly toolName?: string | null | undefined;
+  readonly detail?: string | null | undefined;
+}): string | null {
+  if (!isWebFetchToolName(input.toolName)) {
+    return null;
+  }
+  const detail = input.detail;
+  if (!detail) {
+    return null;
+  }
+  const fieldMatch = /"(?:url|uri)"\s*:\s*"([^"]+)"/i.exec(detail);
+  const candidate =
+    fieldMatch?.[1]?.trim() ??
+    /https?:\/\/[^\s"'<>)\]}]+/i.exec(detail)?.[0]?.replace(/[.,;:!?]+$/, "");
+  if (candidate && /^https?:\/\//i.test(candidate)) {
+    return candidate;
+  }
+  return null;
 }
 
 // Turns internal MCP identifiers into readable inline labels for timeline rows.
@@ -97,6 +143,8 @@ export interface ReadableCommandDisplay {
   readonly target: string;
   readonly fullCommand: string;
 }
+
+export type CommandVisualKind = "inspect" | "git" | "github" | "terminal";
 
 function humanizeRequestKind(
   requestKind: ReadableToolTitleInput["requestKind"],
@@ -409,9 +457,24 @@ export function deriveReadableCommandDisplay(
 // Reuses the same command unwrapping as deriveReadableCommandDisplay so the
 // timeline search icon stays in sync with the derived command label.
 export function isInspectCommand(rawCommand: string): boolean {
+  return resolveCommandVisualKind(rawCommand) === "inspect";
+}
+
+// Classifies command rows for transcript glyphs after peeling away shell/env wrappers.
+// This keeps `git -C`, `env ... gh`, and `/bin/zsh -lc "cd ... && git ..."` visually branded.
+export function resolveCommandVisualKind(rawCommand: string): CommandVisualKind {
   const command = stripCommandDisplayWrappers(unwrapShellCommandIfPresent(rawCommand));
   const [tool] = splitToolAndArgs(firstShellCommandSegment(command));
-  return isInspectCommandTool(tool);
+  if (isInspectCommandTool(tool)) {
+    return "inspect";
+  }
+  if (tool === "git") {
+    return "git";
+  }
+  if (tool === "gh" || tool === "hub") {
+    return "github";
+  }
+  return "terminal";
 }
 
 export function deriveInlineCommandCall(rawCommand: string): string {
