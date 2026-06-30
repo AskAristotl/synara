@@ -61,6 +61,8 @@ export function makeHostConnection(
     path: string,
     options: { method?: "GET" | "POST"; body?: unknown } = {},
   ): Promise<T> {
+    if (host.kind === "remote" && !host.baseUrl)
+      throw new Error(`Host ${host.id} is missing a baseUrl; cannot make a remote request.`);
     const hasBody = options.body !== undefined;
     const init: RequestInit =
       host.kind === "local"

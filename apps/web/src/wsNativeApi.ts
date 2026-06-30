@@ -39,6 +39,8 @@ import {
 
 import { showConfirmDialogFallback } from "./confirmDialogFallback";
 import { showContextMenuFallback } from "./contextMenuFallback";
+import { getActiveHostConnection } from "./hosts/activeHostConnection";
+import type { HostConnection } from "./hosts/hostConnection";
 import { WsTransport } from "./wsTransport";
 import { emitWsTransportState } from "./wsTransportEvents";
 
@@ -99,38 +101,6 @@ function defaultBrowserTitle(url: string): string {
   } catch {
     return url;
   }
-}
-
-async function requestAuthJson<T>(
-  path: string,
-  options: {
-    readonly method?: "GET" | "POST";
-    readonly body?: unknown;
-  } = {},
-): Promise<T> {
-  const hasBody = options.body !== undefined;
-  const response = await fetch(path, {
-    method: options.method ?? "GET",
-    credentials: "same-origin",
-    ...(hasBody
-      ? {
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(options.body),
-        }
-      : {}),
-  });
-  const payload = (await response.json().catch(() => null)) as unknown;
-  if (!response.ok) {
-    const message =
-      payload &&
-      typeof payload === "object" &&
-      "error" in payload &&
-      typeof payload.error === "string"
-        ? payload.error
-        : `Auth request failed with status ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
 }
 
 function createFallbackTab(url = "about:blank") {
@@ -312,7 +282,9 @@ export function onServerSettingsUpdated(
   };
 }
 
-export function createWsNativeApi(): NativeApi {
+export function createWsNativeApi(
+  connection: HostConnection = getActiveHostConnection(),
+): NativeApi {
   if (instance) {
     if (instance.transport.getState() !== "disposed") {
       return instance.api;
@@ -320,7 +292,7 @@ export function createWsNativeApi(): NativeApi {
     instance = null;
   }
 
-  const transport = new WsTransport();
+  const transport = new WsTransport(() => connection.resolveSocketUrl());
   transport.onStateChange((state) => emitWsTransportState(state));
 
   transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
@@ -584,39 +556,42 @@ export function createWsNativeApi(): NativeApi {
       getEnvironment: () => transport.request(WS_METHODS.serverGetEnvironment),
       getSettings: () => transport.request(WS_METHODS.serverGetSettings),
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
-      getAuthSession: () => requestAuthJson<AuthSessionState>("/api/auth/session"),
+      getAuthSession: () => connection.requestAuthJson<AuthSessionState>("/api/auth/session"),
       bootstrapAuth: (input: AuthBootstrapInput) =>
-        requestAuthJson<AuthBootstrapResult>("/api/auth/bootstrap", {
+        connection.requestAuthJson<AuthBootstrapResult>("/api/auth/bootstrap", {
           method: "POST",
           body: input,
         }),
       bootstrapBearerAuth: (input: AuthBootstrapInput) =>
-        requestAuthJson<AuthBearerBootstrapResult>("/api/auth/bootstrap/bearer", {
+        connection.requestAuthJson<AuthBearerBootstrapResult>("/api/auth/bootstrap/bearer", {
           method: "POST",
           body: input,
         }),
       issueAuthWebSocketToken: () =>
-        requestAuthJson<AuthWebSocketTokenResult>("/api/auth/ws-token", { method: "POST" }),
+        connection.requestAuthJson<AuthWebSocketTokenResult>("/api/auth/ws-token", {
+          method: "POST",
+        }),
       createAuthPairingToken: (input?: AuthCreatePairingCredentialInput) =>
-        requestAuthJson<AuthPairingCredentialResult>("/api/auth/pairing-token", {
+        connection.requestAuthJson<AuthPairingCredentialResult>("/api/auth/pairing-token", {
           method: "POST",
           ...(input ? { body: input } : {}),
         }),
       listAuthPairingLinks: () =>
-        requestAuthJson<ReadonlyArray<AuthPairingLink>>("/api/auth/pairing-links"),
+        connection.requestAuthJson<ReadonlyArray<AuthPairingLink>>("/api/auth/pairing-links"),
       revokeAuthPairingLink: (input: AuthRevokePairingLinkInput) =>
-        requestAuthJson<{ revoked: boolean }>("/api/auth/pairing-links/revoke", {
+        connection.requestAuthJson<{ revoked: boolean }>("/api/auth/pairing-links/revoke", {
           method: "POST",
           body: input,
         }),
-      listAuthClients: () => requestAuthJson<ReadonlyArray<AuthClientSession>>("/api/auth/clients"),
+      listAuthClients: () =>
+        connection.requestAuthJson<ReadonlyArray<AuthClientSession>>("/api/auth/clients"),
       revokeAuthClient: (input: AuthRevokeClientSessionInput) =>
-        requestAuthJson<{ revoked: boolean }>("/api/auth/clients/revoke", {
+        connection.requestAuthJson<{ revoked: boolean }>("/api/auth/clients/revoke", {
           method: "POST",
           body: input,
         }),
       revokeOtherAuthClients: () =>
-        requestAuthJson<{ revokedCount: number }>("/api/auth/clients/revoke-others", {
+        connection.requestAuthJson<{ revokedCount: number }>("/api/auth/clients/revoke-others", {
           method: "POST",
         }),
       refreshProviders: () => transport.request(WS_METHODS.serverRefreshProviders),
