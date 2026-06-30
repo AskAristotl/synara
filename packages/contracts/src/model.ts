@@ -263,6 +263,21 @@ const CLAUDE_EXTENDED_THINKING_CAPABILITIES: ModelCapabilities = {
   ],
 };
 
+// Full effort ladder through xhigh + max, but without the ultra tiers
+// (ultrathink/ultracode) or fast mode (Sonnet 5).
+const CLAUDE_SONNET_5_CAPABILITIES: ModelCapabilities = {
+  ...CLAUDE_FLAGSHIP_CAPABILITIES,
+  reasoningEffortLevels: [
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High", isDefault: true },
+    { value: "xhigh", label: "Extra High" },
+    { value: "max", label: "Max" },
+  ],
+  supportsFastMode: false,
+  promptInjectedEffortLevels: [],
+};
+
 type ModelDefinition = {
   readonly slug: string;
   readonly name: string;
@@ -346,6 +361,11 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
         promptInjectedEffortLevels: [],
         contextWindowOptions: CLAUDE_DUAL_CONTEXT_WINDOW,
       },
+    },
+    {
+      slug: "claude-sonnet-5",
+      name: "Claude Sonnet 5",
+      capabilities: CLAUDE_SONNET_5_CAPABILITIES,
     },
     {
       slug: "claude-sonnet-4-6",
@@ -547,7 +567,7 @@ export type ProviderWithDefaultModel = Exclude<ProviderKind, "pi">;
 
 export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderWithDefaultModel, ModelSlug> = {
   codex: "gpt-5.5",
-  claudeAgent: "claude-sonnet-4-6",
+  claudeAgent: "claude-sonnet-5",
   cursor: "auto",
   gemini: "auto-gemini-3",
   grok: "grok-build",
@@ -585,7 +605,8 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
     "opus-4.5": "claude-opus-4-5",
     "claude-opus-4.5": "claude-opus-4-5",
     "claude-opus-4-5-20250120": "claude-opus-4-5",
-    sonnet: "claude-sonnet-4-6",
+    sonnet: "claude-sonnet-5",
+    "sonnet-5": "claude-sonnet-5",
     "sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",

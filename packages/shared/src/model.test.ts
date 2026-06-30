@@ -60,7 +60,7 @@ describe("normalizeModelSlug", () => {
   });
 
   it("uses provider-specific aliases", () => {
-    expect(normalizeModelSlug("sonnet", "claudeAgent")).toBe("claude-sonnet-4-6");
+    expect(normalizeModelSlug("sonnet", "claudeAgent")).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("opus-4.6", "claudeAgent")).toBe("claude-opus-4-6");
     expect(normalizeModelSlug("claude-haiku-4-5-20251001", "claudeAgent")).toBe("claude-haiku-4-5");
     expect(normalizeModelSlug("4.3", "grok")).toBe("grok-build");
@@ -91,7 +91,7 @@ describe("resolveModelSlug", () => {
     expect(resolveModelSlugForProvider("claudeAgent", undefined)).toBe(
       DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
     );
-    expect(resolveModelSlugForProvider("claudeAgent", "sonnet")).toBe("claude-sonnet-4-6");
+    expect(resolveModelSlugForProvider("claudeAgent", "sonnet")).toBe("claude-sonnet-5");
     expect(resolveModelSlugForProvider("claudeAgent", "gpt-5.3-codex")).toBe(
       DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
     );
@@ -127,9 +127,9 @@ describe("resolveSelectableModel", () => {
     expect(
       resolveSelectableModel("claudeAgent", "sonnet", [
         { slug: "claude-opus-4-6", name: "Claude Opus 4.6" },
-        { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+        { slug: "claude-sonnet-5", name: "Claude Sonnet 5" },
       ]),
-    ).toBe("claude-sonnet-4-6");
+    ).toBe("claude-sonnet-5");
   });
 
   it("returns null for empty input", () => {
@@ -229,6 +229,16 @@ describe("getModelCapabilities reasoningEffortLevels", () => {
       "high",
       "max",
       "ultrathink",
+    ]);
+  });
+
+  it("returns claude effort options for Sonnet 5 without the ultra tiers", () => {
+    expect(values("claudeAgent", "claude-sonnet-5")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
     ]);
   });
 

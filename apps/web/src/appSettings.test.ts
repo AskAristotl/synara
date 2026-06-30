@@ -226,7 +226,7 @@ describe("resolveAppModelSelection", () => {
         },
         "sonnet",
       ),
-    ).toBe("claude-sonnet-4-6");
+    ).toBe("claude-sonnet-5");
   });
 
   it("resolves transient selected custom models included in app model options", () => {
