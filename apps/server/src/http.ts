@@ -378,17 +378,22 @@ const authRouteEffect = Effect.gen(function* () {
 // cross-origin callers (e.g. the desktop app at t3://app reaching a remote
 // host), and OPTIONS preflight must short-circuit before any auth logic
 // runs. Computed here, outside authRouteEffect, so it covers all branches
-// uniformly, including the AuthError/error catch handler.
-const authEffectRouteLayer = HttpRouter.add(
+// uniformly, including the AuthError/error catch handler. The `!url` guard
+// runs first so an unparseable request URL still gets the prior 400 Bad
+// Request behavior, even for OPTIONS.
+export const authEffectRouteLayer = HttpRouter.add(
   "*",
   "/api/auth/*",
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const config = yield* ServerConfig;
     const url = HttpServerRequest.toURL(request);
-    const cors = url
-      ? appCorsHeaders({ rawOrigin: request.headers.origin, requestOrigin: url.origin, config })
-      : {};
+    if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
+    const cors = appCorsHeaders({
+      rawOrigin: request.headers.origin,
+      requestOrigin: url.origin,
+      config,
+    });
 
     if (request.method === "OPTIONS") {
       return HttpServerResponse.empty({ status: 204, headers: cors });
