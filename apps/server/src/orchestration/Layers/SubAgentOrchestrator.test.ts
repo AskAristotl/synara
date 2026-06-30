@@ -1,14 +1,19 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  MessageId,
   type OrchestrationCommand,
+  type OrchestrationEvent,
+  OrchestrationThread,
   ProjectId,
   type ProviderComposerCapabilities,
   SubAgentSpawnInput,
+  SubAgentWaitInput,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
-import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Queue, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ProviderUnsupportedError } from "../../provider/Errors.ts";
@@ -21,6 +26,10 @@ import {
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
 import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
+import {
   SubAgentError,
   SubAgentOrchestrator,
   type SubAgentSpawnCaller,
@@ -28,6 +37,171 @@ import {
 import { SubAgentOrchestratorLive } from "./SubAgentOrchestrator.ts";
 
 const decodeSpawnInput = Schema.decodeUnknownSync(SubAgentSpawnInput);
+const decodeWaitInput = Schema.decodeUnknownSync(SubAgentWaitInput);
+const decodeThread = Schema.decodeUnknownSync(OrchestrationThread);
+
+/**
+ * A ProjectionSnapshotQuery test double backed by a mutable thread map. Only
+ * `getThreadDetailById` is meaningful — `wait` reads each child's envelope/state
+ * through it; the rest are inert (mirrors how the discovery/engine doubles stub
+ * out unused members).
+ */
+function createProjectionStub(
+  threads: ReadonlyMap<string, OrchestrationThread>,
+): ProjectionSnapshotQueryShape {
+  const unused = () => Effect.die(new Error("projection snapshot method unused in test"));
+  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
+    Effect.sync(() => {
+      const thread = threads.get(threadId);
+      return thread ? Option.some(thread) : Option.none();
+    });
+  return {
+    getCommandReadModel: unused,
+    getSnapshot: unused,
+    getCounts: unused,
+    getSnapshotSequence: unused,
+    getShellSnapshot: unused,
+    getActiveProjectByWorkspaceRoot: unused,
+    getProjectShellById: unused,
+    getFirstActiveThreadIdByProjectId: unused,
+    getThreadCheckpointContext: unused,
+    getFullThreadDiffContext: unused,
+    getThreadShellById: unused,
+    findSyntheticSubagentParentThread: unused,
+    getThreadDetailById,
+    getThreadDetailSnapshotById: unused,
+  };
+}
+
+const NOW = new Date("2026-06-30T00:00:00.000Z").getTime();
+const iso = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+
+type SessionStub = {
+  readonly status: string;
+  readonly activeTurnId?: string | null;
+  readonly lastError?: string | null;
+};
+
+function makeSession(threadId: ThreadId, session: SessionStub) {
+  return {
+    threadId,
+    status: session.status,
+    providerName: "codex",
+    activeTurnId: session.activeTurnId ?? null,
+    lastError: session.lastError ?? null,
+    updatedAt: iso(0),
+  };
+}
+
+function makeThread(opts: {
+  readonly id: ThreadId;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly messages?: ReadonlyArray<{ readonly role: string; readonly text: string }>;
+  readonly session: ReturnType<typeof makeSession> | null;
+  readonly latestTurnState?: "running" | "completed" | "interrupted" | "error" | null;
+}): OrchestrationThread {
+  const messages = (opts.messages ?? []).map((message, index) => ({
+    id: MessageId.makeUnsafe(randomUUID()),
+    role: message.role,
+    text: message.text,
+    turnId: null,
+    streaming: false,
+    createdAt: iso(index * 1000),
+    updatedAt: iso(index * 1000),
+  }));
+  const latestTurn = opts.latestTurnState
+    ? {
+        turnId: TurnId.makeUnsafe(randomUUID()),
+        state: opts.latestTurnState,
+        requestedAt: iso(0),
+        startedAt: iso(0),
+        completedAt: opts.latestTurnState === "completed" ? iso(0) : null,
+        assistantMessageId: null,
+      }
+    : null;
+  return decodeThread({
+    id: opts.id,
+    projectId: ProjectId.makeUnsafe(randomUUID()),
+    title: "child sub-agent",
+    modelSelection: { provider: opts.provider ?? "codex", model: opts.model ?? "gpt-5-codex" },
+    runtimeMode: "full-access",
+    branch: null,
+    worktreePath: null,
+    latestTurn,
+    createdAt: iso(0),
+    updatedAt: iso(0),
+    deletedAt: null,
+    messages,
+    activities: [],
+    checkpoints: [],
+    session: opts.session,
+  });
+}
+
+/**
+ * Minimal domain events for the two signals `wait` consumes. Cast to
+ * OrchestrationEvent (the consumer only reads `type` + `payload.threadId` /
+ * `payload.session`), mirroring the cast-event style of the runtime-ingestion
+ * harness.
+ */
+function sessionSetEvent(
+  threadId: ThreadId,
+  session: ReturnType<typeof makeSession>,
+): OrchestrationEvent {
+  return {
+    type: "thread.session-set",
+    payload: { threadId, session },
+  } as unknown as OrchestrationEvent;
+}
+function turnDiffCompletedEvent(threadId: ThreadId): OrchestrationEvent {
+  return {
+    type: "thread.turn-diff-completed",
+    payload: { threadId },
+  } as unknown as OrchestrationEvent;
+}
+
+/**
+ * Harness for `wait`: a recording engine whose `streamDomainEvents` is backed by
+ * an unbounded Queue the test can push into (retained delivery to the single
+ * `wait` consumer keeps the test deterministic regardless of subscribe timing),
+ * plus a mutable thread map behind ProjectionSnapshotQuery.
+ */
+function buildWaitHarness() {
+  const eventQueue = Effect.runSync(Queue.unbounded<OrchestrationEvent>());
+  const threads = new Map<string, OrchestrationThread>();
+  const engine: OrchestrationEngineShape = {
+    readEvents: () => Stream.empty,
+    getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
+    dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
+    repairState: () => Effect.die(new Error("repairState unused in test")),
+    streamDomainEvents: Stream.fromQueue(eventQueue),
+  };
+  const layer = SubAgentOrchestratorLive.pipe(
+    Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
+    Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
+    Layer.provide(Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(threads))),
+  );
+  const runtime = ManagedRuntime.make(layer);
+  const setThread = (thread: OrchestrationThread): void => {
+    threads.set(thread.id, thread);
+  };
+  const pushEvent = (event: OrchestrationEvent): void => {
+    Effect.runSync(Queue.offer(eventQueue, event));
+  };
+  return { runtime, setThread, pushEvent };
+}
+
+function resultById<T extends { readonly agentId: string }>(
+  results: readonly T[],
+  id: ThreadId,
+): T {
+  const result = results.find((entry) => entry.agentId === id);
+  if (!result) {
+    throw new Error(`expected a result for agent ${id}`);
+  }
+  return result;
+}
 
 /**
  * A fake OrchestrationEngineService that records every dispatched command so a
@@ -89,6 +263,7 @@ function buildHarness(input: { readonly available: boolean }) {
   const layer = SubAgentOrchestratorLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(input.available))),
+    Layer.provide(Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(new Map()))),
   );
   const runtime = ManagedRuntime.make(layer);
   return { runtime, commands };
@@ -269,6 +444,278 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
         throw new Error("expected the first dispatched command to be thread.create");
       }
       expect(createCommand.runtimeMode).toBe("approval-required");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.wait (terminal collection)", () => {
+  it("returns one completed envelope with the child's last assistant message once its turn finishes", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // Seed NON-terminal (session running) so resolution is driven purely by the
+    // domain-event stream, not the seed snapshot.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [
+          { role: "user", text: "do the thing" },
+          { role: "assistant", text: "all done, here is the result" },
+        ],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    // The engine emits the child's turn completion then a return to idle.
+    pushEvent(turnDiffCompletedEvent(child));
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results).toHaveLength(1);
+      const result = results[0];
+      expect(result?.status).toBe("completed");
+      expect(result?.finalMessage).toBe("all done, here is the result");
+      expect(result?.agentId).toBe(child);
+      expect(result?.threadId).toBe(child);
+      expect(result?.provider).toBe("codex");
+      expect(result?.model).toBe("gpt-5-codex");
+      expect(result?.diff).toBeNull();
+      expect(result?.error).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns a failed envelope carrying the session error when the child errors", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // Seed running (non-terminal) with the lastError already on the thread so the
+    // build-time read surfaces it; the error session-set event drives the failed
+    // resolution through the stream.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [{ role: "user", text: "go" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+          lastError: "provider exploded",
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(
+      sessionSetEvent(
+        child,
+        makeSession(child, { status: "error", lastError: "provider exploded" }),
+      ),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.status).toBe("failed");
+      expect(results[0]?.error).toBe("provider exploded");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns a running envelope on timeout instead of hanging", async () => {
+    const { runtime, setThread } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // Never-finishing child: seeded running, no terminal event ever pushed.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [{ role: "user", text: "go" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // timeoutSeconds clamps to 1s (PositiveInt floor) — the call returns rather
+      // than hanging for the 600s default.
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+      );
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.status).toBe("running");
+      expect(results[0]?.error).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("resolves a child that is already terminal at seed time without hanging", async () => {
+    const { runtime, setThread } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // Already idle after a completed turn — must resolve immediately from the seed
+    // snapshot, not wait for an event or the timeout.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [
+          { role: "user", text: "task" },
+          { role: "assistant", text: "seed-final" },
+        ],
+        session: makeSession(child, { status: "idle", activeTurnId: null }),
+        latestTurnState: "completed",
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.finalMessage).toBe("seed-final");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("mode 'any' resolves as soon as the first child finishes", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const finished = ThreadId.makeUnsafe(randomUUID());
+    const stillRunning = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: finished,
+        messages: [
+          { role: "user", text: "a" },
+          { role: "assistant", text: "first done" },
+        ],
+        session: makeSession(finished, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    setThread(
+      makeThread({
+        id: stillRunning,
+        messages: [{ role: "user", text: "b" }],
+        session: makeSession(stillRunning, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    // Only the first child finishes.
+    pushEvent(turnDiffCompletedEvent(finished));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // A large timeout proves "any" returns on the first terminal child rather
+      // than waiting on the still-running one (or the timeout).
+      const results = await runtime.runPromise(
+        orchestrator.wait(
+          decodeWaitInput({ agentIds: [finished, stillRunning], mode: "any", timeoutSeconds: 60 }),
+        ),
+      );
+
+      expect(results).toHaveLength(2);
+      expect(resultById(results, finished).status).toBe("completed");
+      expect(resultById(results, finished).finalMessage).toBe("first done");
+      expect(resultById(results, stillRunning).status).toBe("running");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("preserves agentIds order and detects idle-after-run completion", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const viaTurnDiff = ThreadId.makeUnsafe(randomUUID());
+    const viaIdle = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: viaTurnDiff,
+        messages: [
+          { role: "user", text: "a" },
+          { role: "assistant", text: "A-final" },
+        ],
+        session: makeSession(viaTurnDiff, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    setThread(
+      makeThread({
+        id: viaIdle,
+        messages: [
+          { role: "user", text: "b" },
+          { role: "assistant", text: "B-final" },
+        ],
+        session: makeSession(viaIdle, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(turnDiffCompletedEvent(viaTurnDiff));
+    // Running -> idle with no active turn is a finished turn (idle-after-run).
+    pushEvent(
+      sessionSetEvent(viaIdle, makeSession(viaIdle, { status: "idle", activeTurnId: null })),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // Pass the ids in reverse to prove order follows the input, not resolution.
+      const results = await runtime.runPromise(
+        orchestrator.wait(
+          decodeWaitInput({ agentIds: [viaIdle, viaTurnDiff], mode: "all", timeoutSeconds: 30 }),
+        ),
+      );
+
+      expect(results.map((entry) => entry.agentId)).toEqual([viaIdle, viaTurnDiff]);
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.finalMessage).toBe("B-final");
+      expect(results[1]?.status).toBe("completed");
+      expect(results[1]?.finalMessage).toBe("A-final");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails the whole call with unknown-agent when an agentId has no backing thread", async () => {
+    const { runtime } = buildWaitHarness();
+    const missing = ThreadId.makeUnsafe(randomUUID());
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [missing], mode: "all" })).pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("unknown-agent");
     } finally {
       await runtime.dispose();
     }

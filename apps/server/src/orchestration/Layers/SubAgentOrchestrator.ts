@@ -25,19 +25,27 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   ModelSelection,
+  type OrchestrationEvent,
+  type OrchestrationMessage,
+  type OrchestrationSession,
+  type OrchestrationThread,
   type ProviderKind,
   type RuntimeMode,
   type SubAgentApprovalMode,
+  type SubAgentResult,
   type SubAgentSpawnInput,
+  type SubAgentStatus,
   ThreadId,
 } from "@t3tools/contracts";
-import { Effect, Layer } from "effect";
+import { Deferred, Duration, Effect, Layer, Option, Stream } from "effect";
 
 import { getDefaultModel } from "@t3tools/shared/model";
+import { clampWaitSeconds, SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { ProviderDiscoveryService } from "../../provider/Services/ProviderDiscoveryService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   SubAgentError,
   SubAgentOrchestrator,
@@ -121,11 +129,129 @@ const toDispatchError = (cause: OrchestrationDispatchError): SubAgentError =>
     cause,
   });
 
+/**
+ * The terminal classifications `wait` tracks per child. Maps to the public
+ * {@link SubAgentStatus} at build time (a still-running child has no entry and
+ * becomes `"running"`).
+ */
+type SubAgentTerminalOutcome = "completed" | "failed" | "interrupted";
+
+/**
+ * Classify a child's session snapshot into a terminal outcome, or `null` when
+ * the child is still in flight. `hasRun` gates the `idle`/`ready` → `completed`
+ * transition: a freshly-created child sitting at its initial idle (before its
+ * turn has actually run) must NOT be mistaken for a finished turn. Only once we
+ * have observed the turn run (session went `running`, a `latestTurn` exists, or
+ * a turn-diff completed) does a return to idle with no active turn count as a
+ * completed turn.
+ */
+function classifySession(
+  session: OrchestrationSession | null,
+  hasRun: boolean,
+): SubAgentTerminalOutcome | null {
+  if (session === null) {
+    return null;
+  }
+  switch (session.status) {
+    case "error":
+      return "failed";
+    case "interrupted":
+    case "stopped":
+      return "interrupted";
+    case "idle":
+    case "ready":
+      return hasRun && session.activeTurnId === null ? "completed" : null;
+    default:
+      // "starting" | "running": a turn is pending or in flight, not terminal.
+      return null;
+  }
+}
+
+/** Text of the child's last assistant message, or `""` when it has none yet. */
+function lastAssistantMessage(messages: readonly OrchestrationMessage[]): string {
+  let latest: OrchestrationMessage | null = null;
+  for (const message of messages) {
+    if (
+      message.role === "assistant" &&
+      (latest === null || message.createdAt >= latest.createdAt)
+    ) {
+      latest = message;
+    }
+  }
+  return latest?.text ?? "";
+}
+
+/**
+ * Fold a single domain event into the per-child resolution state. Only the two
+ * terminal-bearing event types are consumed: `thread.session-set` (drives
+ * failed/interrupted/completed via {@link classifySession}) and
+ * `thread.turn-diff-completed` (an unambiguous "turn finished" → completed).
+ * Events for non-target threads are ignored.
+ */
+function applyDomainEvent(
+  event: OrchestrationEvent,
+  targetIds: ReadonlySet<string>,
+  observedRunning: Set<string>,
+  resolveOutcome: (agentId: string, outcome: SubAgentTerminalOutcome) => void,
+  applySession: (agentId: string, session: OrchestrationSession | null) => void,
+): void {
+  if (event.type === "thread.session-set") {
+    if (targetIds.has(event.payload.threadId)) {
+      applySession(event.payload.threadId, event.payload.session);
+    }
+    return;
+  }
+  if (event.type === "thread.turn-diff-completed") {
+    if (targetIds.has(event.payload.threadId)) {
+      observedRunning.add(event.payload.threadId);
+      resolveOutcome(event.payload.threadId, "completed");
+    }
+  }
+}
+
+/**
+ * Project a child thread into a {@link SubAgentResult} envelope (§3.4). `diff`
+ * is always `null` here — worktree diff population lands in Task 4.3. `error`
+ * carries `session.lastError` and is only meaningful for a `"failed"` child.
+ */
+function buildSubAgentResult(
+  agentId: ThreadId,
+  thread: OrchestrationThread,
+  outcome: SubAgentTerminalOutcome | null,
+): SubAgentResult {
+  const status: SubAgentStatus = outcome ?? "running";
+  return {
+    agentId,
+    threadId: agentId,
+    provider: thread.modelSelection.provider,
+    model: thread.modelSelection.model ?? null,
+    status,
+    finalMessage: lastAssistantMessage(thread.messages),
+    diff: null,
+    error: thread.session?.lastError ?? null,
+  };
+}
+
 export const SubAgentOrchestratorLive = Layer.effect(
   SubAgentOrchestrator,
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
     const discovery = yield* ProviderDiscoveryService;
+    const projection = yield* ProjectionSnapshotQuery;
+
+    // Read a child's projection detail, mapping an infra read failure to a typed
+    // SubAgentError so `wait`'s only error channel stays SubAgentError.
+    const readChildThread = (agentId: ThreadId) =>
+      projection.getThreadDetailById(agentId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new SubAgentError({
+              reason: "wait-failed",
+              detail: `Failed to read sub-agent thread '${agentId}'.`,
+              cause,
+            }),
+        ),
+      );
 
     const spawn: SubAgentOrchestratorShape["spawn"] = (caller, input) =>
       Effect.gen(function* () {
@@ -220,6 +346,108 @@ export const SubAgentOrchestratorLive = Layer.effect(
         return { agentId: childThreadId };
       });
 
-    return { spawn } satisfies SubAgentOrchestratorShape;
+    const wait: SubAgentOrchestratorShape["wait"] = (input) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const timeoutSeconds = clampWaitSeconds(
+            input.timeoutSeconds ?? SUBAGENT_WAIT_MAX_SECONDS,
+          );
+          const mode = input.mode ?? "all";
+          const agentIds = input.agentIds;
+          const targetIds = new Set<string>(agentIds);
+
+          // Per-child resolution state. Effect fibers run cooperatively on one
+          // thread and every apply below is synchronous (no await mid-mutation),
+          // so plain mutable structures are race-free here.
+          const outcomes = new Map<string, SubAgentTerminalOutcome>();
+          const observedRunning = new Set<string>();
+
+          // First terminal outcome wins and is stable (later events are ignored).
+          const resolveOutcome = (agentId: string, outcome: SubAgentTerminalOutcome): void => {
+            if (!outcomes.has(agentId)) {
+              outcomes.set(agentId, outcome);
+            }
+          };
+          const applySession = (agentId: string, session: OrchestrationSession | null): void => {
+            if (session?.status === "running") {
+              observedRunning.add(agentId);
+            }
+            const outcome = classifySession(session, observedRunning.has(agentId));
+            if (outcome !== null) {
+              resolveOutcome(agentId, outcome);
+            }
+          };
+          const isResolved = (): boolean =>
+            mode === "any"
+              ? agentIds.some((agentId) => outcomes.has(agentId))
+              : agentIds.every((agentId) => outcomes.has(agentId));
+
+          const done = yield* Deferred.make<void>();
+          const signalIfResolved = Effect.suspend(() =>
+            isResolved() ? Deferred.succeed(done, undefined) : Effect.succeed(false),
+          );
+
+          // 1. Subscribe to the hot domain-event stream BEFORE snapshotting so a
+          //    terminal event that fires in the seed gap is observed by the
+          //    stream rather than lost.
+          yield* Effect.forkScoped(
+            Stream.runForEach(engine.streamDomainEvents, (event) =>
+              Effect.suspend(() => {
+                applyDomainEvent(event, targetIds, observedRunning, resolveOutcome, applySession);
+                return signalIfResolved;
+              }),
+            ),
+          );
+
+          // 2. Seed each child's current state. A child may already be terminal
+          //    at seed time — resolve it immediately rather than hang.
+          for (const agentId of agentIds) {
+            const threadOption = yield* readChildThread(agentId);
+            if (Option.isNone(threadOption)) {
+              return yield* Effect.fail(
+                new SubAgentError({
+                  reason: "unknown-agent",
+                  detail: `No sub-agent thread found for agentId '${agentId}'.`,
+                }),
+              );
+            }
+            const thread = threadOption.value;
+            // A non-null latestTurn means a turn has been started for this child,
+            // so a subsequent return to idle counts as a finished turn.
+            if (thread.latestTurn !== null) {
+              observedRunning.add(agentId);
+            }
+            applySession(agentId, thread.session);
+            if (!outcomes.has(agentId) && thread.latestTurn?.state === "completed") {
+              resolveOutcome(agentId, "completed");
+            }
+          }
+          yield* signalIfResolved;
+
+          // 3. Block until the resolution predicate holds or the timeout elapses.
+          //    On timeout, still-unresolved children fall through to "running".
+          yield* Deferred.await(done).pipe(Effect.timeoutOption(Duration.seconds(timeoutSeconds)));
+
+          // 4. Build one envelope per agentId, in input order, from a fresh read.
+          const results: SubAgentResult[] = [];
+          for (const agentId of agentIds) {
+            const threadOption = yield* readChildThread(agentId);
+            if (Option.isNone(threadOption)) {
+              return yield* Effect.fail(
+                new SubAgentError({
+                  reason: "unknown-agent",
+                  detail: `No sub-agent thread found for agentId '${agentId}'.`,
+                }),
+              );
+            }
+            results.push(
+              buildSubAgentResult(agentId, threadOption.value, outcomes.get(agentId) ?? null),
+            );
+          }
+          return results;
+        }),
+      );
+
+    return { spawn, wait } satisfies SubAgentOrchestratorShape;
   }),
 );

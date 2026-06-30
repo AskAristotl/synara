@@ -20,7 +20,9 @@
  */
 import type {
   ProjectId,
+  SubAgentResult,
   SubAgentSpawnInput,
+  SubAgentWaitInput,
   ThreadEnvironmentMode,
   ThreadId,
 } from "@t3tools/contracts";
@@ -36,12 +38,16 @@ import type { Effect } from "effect";
  * lifecycle reasons for `wait` / `stop`. `"model-unavailable"` covers a spawn
  * with no explicit `model` for a provider whose `getDefaultModel` has no
  * default (e.g. `pi`) — fail fast instead of dispatching a thread with a null
- * model.
+ * model. `"unknown-agent"` is the `wait` failure for an `agentId` that has no
+ * backing thread (no envelope can be built without a provider); `"wait-failed"`
+ * covers an infra read failure while collecting child state.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
   "model-unavailable",
   "dispatch-failed",
+  "unknown-agent",
+  "wait-failed",
 ]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 
@@ -109,6 +115,27 @@ export interface SubAgentOrchestratorShape {
     caller: SubAgentSpawnCaller,
     input: SubAgentSpawnInput,
   ) => Effect.Effect<{ agentId: ThreadId }, SubAgentError>;
+
+  /**
+   * Block until each requested child reaches a terminal state (or the clamped
+   * timeout elapses), then return one result envelope per `agentId`.
+   *
+   * Subscribes to the orchestration domain-event stream BEFORE snapshotting each
+   * child so a terminal event in the gap is not lost, then resolves a child when
+   * its session reaches a terminal status (`error` → `"failed"`,
+   * `interrupted`/`stopped` → `"interrupted"`, a finished turn → `"completed"`).
+   * `mode: "all"` (default) resolves when every child is terminal; `mode: "any"`
+   * resolves on the first terminal child. Children still running when the timeout
+   * elapses (or when `"any"` resolves early) are returned with `status:
+   * "running"` — a valid, re-waitable result, not an error.
+   *
+   * Results are returned in the SAME ORDER as `input.agentIds`. An `agentId` with
+   * no backing thread fails the whole call with reason `"unknown-agent"`.
+   * Ownership/authorization checks are a later task and are NOT performed here.
+   */
+  readonly wait: (
+    input: SubAgentWaitInput,
+  ) => Effect.Effect<readonly SubAgentResult[], SubAgentError>;
 }
 
 /**
