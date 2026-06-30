@@ -7,6 +7,7 @@ import {
   SubAgentSpawnInput,
   ThreadId,
 } from "@t3tools/contracts";
+import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
@@ -19,7 +20,11 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
-import { SubAgentError, SubAgentOrchestrator } from "../Services/SubAgentOrchestrator.ts";
+import {
+  SubAgentError,
+  SubAgentOrchestrator,
+  type SubAgentSpawnCaller,
+} from "../Services/SubAgentOrchestrator.ts";
 import { SubAgentOrchestratorLive } from "./SubAgentOrchestrator.ts";
 
 const decodeSpawnInput = Schema.decodeUnknownSync(SubAgentSpawnInput);
@@ -89,11 +94,19 @@ function buildHarness(input: { readonly available: boolean }) {
   return { runtime, commands };
 }
 
-function makeCaller() {
+const LOCAL_WORKSPACE: SubAgentSpawnCaller["workspace"] = {
+  envMode: "local",
+  worktreePath: null,
+  branch: null,
+};
+
+function makeCaller(
+  workspace: SubAgentSpawnCaller["workspace"] = LOCAL_WORKSPACE,
+): SubAgentSpawnCaller {
   return {
     threadId: ThreadId.makeUnsafe(randomUUID()),
     projectId: ProjectId.makeUnsafe(randomUUID()),
-    cwd: "/tmp/sub-agent-project",
+    workspace,
     canSpawn: true,
   };
 }
@@ -127,6 +140,10 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
       expect(createCommand.branch).toBeNull();
       expect(createCommand.worktreePath).toBeNull();
       expect(createCommand.threadId).toBe(result.agentId);
+      expect(createCommand.runtimeMode).toBe("full-access");
+      expect(createCommand.modelSelection.provider).toBe("codex");
+      expect(createCommand.modelSelection.model).toBeTruthy();
+      expect(createCommand.title.length).toBeGreaterThan(0);
 
       const turnCommand = commands[1];
       if (turnCommand?.type !== "thread.turn.start") {
@@ -157,6 +174,101 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
       expect(error).toBeInstanceOf(SubAgentError);
       expect(error.reason).toBe("provider-unavailable");
       expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with model-unavailable when no model is given and the provider has no default", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const caller = makeCaller();
+    // "pi" has no default model (getDefaultModel("pi") === null); omitting
+    // `model` must fail fast rather than dispatch a thread.create with a
+    // null model.
+    const input = decodeSpawnInput({
+      provider: "pi",
+      task: "x",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("model-unavailable");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("copies the caller's worktree workspace fields onto a 'share' child (share parent cwd)", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const callerWorkspace: SubAgentSpawnCaller["workspace"] = {
+      envMode: "worktree",
+      worktreePath: "/wt/x",
+      branch: "feat/x",
+    };
+    const caller = makeCaller(callerWorkspace);
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.envMode).toBe("worktree");
+      expect(createCommand.worktreePath).toBe("/wt/x");
+      expect(createCommand.branch).toBe("feat/x");
+
+      // The point of copying these fields verbatim is that
+      // resolveThreadWorkspaceCwd resolves the child to the same cwd as the
+      // caller, given the same project root.
+      const projectCwd = "/project/root";
+      const callerCwd = resolveThreadWorkspaceCwd({
+        projectCwd,
+        envMode: callerWorkspace.envMode,
+        worktreePath: callerWorkspace.worktreePath,
+      });
+      const childCwd = resolveThreadWorkspaceCwd({
+        projectCwd,
+        envMode: createCommand.envMode,
+        worktreePath: createCommand.worktreePath,
+      });
+      expect(childCwd).toBe(callerCwd);
+      expect(childCwd).toBe("/wt/x");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("maps approval 'ask-human' to runtimeMode 'approval-required'", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+      approval: "ask-human",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.runtimeMode).toBe("approval-required");
     } finally {
       await runtime.dispose();
     }

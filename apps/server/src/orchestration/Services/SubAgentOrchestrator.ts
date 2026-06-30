@@ -18,7 +18,12 @@
  *
  * @module SubAgentOrchestrator
  */
-import type { ProjectId, SubAgentSpawnInput, ThreadId } from "@t3tools/contracts";
+import type {
+  ProjectId,
+  SubAgentSpawnInput,
+  ThreadEnvironmentMode,
+  ThreadId,
+} from "@t3tools/contracts";
 import { Schema, ServiceMap } from "effect";
 import type { Effect } from "effect";
 
@@ -28,9 +33,16 @@ import type { Effect } from "effect";
  * Starts with the failures `spawn` can produce in Phase 1. Adding a reason is a
  * one-line change here; later tasks introduce governance reasons such as
  * `"depth-limit"`, `"concurrency-limit"`, and `"not-owner"` (Task 5.2) and
- * lifecycle reasons for `wait` / `stop`.
+ * lifecycle reasons for `wait` / `stop`. `"model-unavailable"` covers a spawn
+ * with no explicit `model` for a provider whose `getDefaultModel` has no
+ * default (e.g. `pi`) — fail fast instead of dispatching a thread with a null
+ * model.
  */
-export const SubAgentErrorReason = Schema.Literals(["provider-unavailable", "dispatch-failed"]);
+export const SubAgentErrorReason = Schema.Literals([
+  "provider-unavailable",
+  "model-unavailable",
+  "dispatch-failed",
+]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 
 /**
@@ -55,14 +67,22 @@ export class SubAgentError extends Schema.TaggedErrorClass<SubAgentError>()("Sub
  * SubAgentSpawnCaller - Identity + capability context of the spawning session.
  *
  * Resolved server-side from the caller's bearer token (never client-supplied for
- * the caller's own identity). `cwd` is the caller's working directory, reused by
- * the share-cwd workspace path. `canSpawn` reflects the depth-1 governance flag;
- * it is accepted here but not yet enforced (enforcement lands in Task 5.2).
+ * the caller's own identity). `workspace` is the caller thread's own
+ * `envMode`/`worktreePath`/`branch` triple — exactly the fields
+ * `resolveThreadWorkspaceCwd` (`@t3tools/shared/threadEnvironment`) needs to
+ * resolve a cwd. The share-cwd workspace path copies these verbatim onto the
+ * child thread so the child resolves to the same cwd as the caller. `canSpawn`
+ * reflects the depth-1 governance flag; it is accepted here but not yet
+ * enforced (enforcement lands in Task 5.2).
  */
 export interface SubAgentSpawnCaller {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
-  readonly cwd: string | undefined;
+  readonly workspace: {
+    readonly envMode: ThreadEnvironmentMode;
+    readonly worktreePath: string | null;
+    readonly branch: string | null;
+  };
   readonly canSpawn: boolean;
 }
 
@@ -78,7 +98,10 @@ export interface SubAgentOrchestratorShape {
    * Non-blocking: dispatches `thread.create` (linking the child to the caller)
    * then `thread.turn.start` (carrying `input.task` as the child's first turn).
    * Validates `input.provider` against provider discovery; an unavailable
-   * provider fails with `SubAgentError` reason `"provider-unavailable"`.
+   * provider fails with `SubAgentError` reason `"provider-unavailable"`. If
+   * `input.model` is omitted and the provider has no default model (e.g.
+   * `pi`), fails with reason `"model-unavailable"` instead of dispatching a
+   * thread with a null model.
    *
    * @returns The minted child `ThreadId` as `agentId` (the wait/send/stop handle).
    */
