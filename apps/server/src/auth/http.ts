@@ -315,6 +315,36 @@ export const serveAuthHttpRoute = Effect.fn(function* (input: AuthHttpRouteOptio
       return;
     }
 
+    if (method === "POST" && input.url.pathname === "/api/auth/pairing-url") {
+      const session = yield* input.serverAuth.authenticateHttpRequest(authRequest);
+      if (session.role !== "owner") {
+        return yield* new AuthError({
+          message: "Only owner sessions can create pairing links.",
+          status: 403,
+        });
+      }
+      const payload = hasRequestBody(headers)
+        ? yield* readJsonBody(input.req, "Invalid pairing url payload.").pipe(
+            Effect.flatMap((body) =>
+              decodeCreatePairingCredentialInput(body).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new AuthError({
+                      message: "Invalid pairing url payload.",
+                      status: 400,
+                      cause,
+                    }),
+                ),
+              ),
+            ),
+          )
+        : {};
+      const baseUrl = `${input.url.protocol}//${input.url.host}`;
+      const url = yield* input.serverAuth.issueClientPairingUrl(baseUrl, payload);
+      respondJson(respond, 200, { url });
+      return;
+    }
+
     if (method === "GET" && input.url.pathname === "/api/auth/pairing-links") {
       yield* authenticateOwnerSession({ serverAuth: input.serverAuth, authRequest });
       const pairingLinks = yield* input.serverAuth.listPairingLinks();

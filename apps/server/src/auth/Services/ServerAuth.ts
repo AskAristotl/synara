@@ -81,6 +81,10 @@ export interface ServerAuthShape {
     session: AuthenticatedSession,
   ) => Effect.Effect<AuthWebSocketTokenResult, AuthError>;
   readonly issueStartupPairingUrl: (baseUrl: string) => Effect.Effect<string, AuthError>;
+  readonly issueClientPairingUrl: (
+    baseUrl: string,
+    input?: AuthCreatePairingCredentialInput,
+  ) => Effect.Effect<string, AuthError>;
 }
 
 export class ServerAuth extends ServiceMap.Service<ServerAuth, ServerAuthShape>()(

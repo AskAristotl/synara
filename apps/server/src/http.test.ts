@@ -244,6 +244,8 @@ function makeFakeServerAuth(overrides: Partial<ServerAuthShape> = {}): ServerAut
       }),
     issueWebSocketToken: () => Effect.succeed({ token: "ws-token", expiresAt }),
     issueStartupPairingUrl: () => Effect.succeed("http://127.0.0.1:3773/pair#token=PAIRINGTOKEN"),
+    issueClientPairingUrl: () =>
+      Effect.succeed("http://127.0.0.1:3773/pair#token=CLIENTPAIRINGTOKEN"),
     ...overrides,
   } satisfies ServerAuthShape;
 }

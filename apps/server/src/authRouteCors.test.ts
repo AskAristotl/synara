@@ -88,6 +88,7 @@ function makeFakeServerAuth(): ServerAuthShape {
     authenticateWebSocketUpgrade: () => Effect.die("unused"),
     issueWebSocketToken: () => Effect.die("unused"),
     issueStartupPairingUrl: () => Effect.die("unused"),
+    issueClientPairingUrl: () => Effect.die("unused"),
   } satisfies ServerAuthShape;
 }
 
