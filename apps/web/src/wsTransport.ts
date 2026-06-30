@@ -113,7 +113,7 @@ export function shouldKeepServerLifecycleStream(activeChannels: ReadonlySet<stri
 }
 
 export class WsTransport {
-  private readonly explicitUrl: string | null;
+  private readonly resolveUrl: () => Promise<string>;
   private readonly listeners = new Map<string, Set<(message: WsPush) => void>>();
   private readonly stateListeners = new Set<(state: WsTransportState) => void>();
   private readonly latestPushByChannel = new Map<string, WsPush>();
@@ -121,8 +121,12 @@ export class WsTransport {
   private sessionVersion = 0;
   private state: WsTransportState = "connecting";
   private disposed = false;
-  private runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never>;
-  private clientScope: Scope.Closeable;
+  private runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never> | null = null;
+  private clientScope: Scope.Closeable | null = null;
+  private sessionReady: Promise<{
+    runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never>;
+    clientScope: Scope.Closeable;
+  }> | null = null;
   private clientPromise: Promise<RpcClientInstance>;
   private reconnectPromise: Promise<RpcClientInstance> | null = null;
   private reconnectFailures = 0;
@@ -131,12 +135,20 @@ export class WsTransport {
   private shellSubscribed = false;
   private readonly threadSubscriptions = new Map<string, unknown>();
 
-  constructor(url?: string) {
-    this.explicitUrl = url ?? null;
+  constructor(url?: string | (() => Promise<string>)) {
+    this.resolveUrl =
+      typeof url === "function"
+        ? url
+        : typeof url === "string"
+          ? () => Promise.resolve(resolveRpcUrl(url))
+          : () => Promise.resolve(makeSocketUrl(null));
     const session = this.createSession();
-    this.runtime = session.runtime;
-    this.clientScope = session.clientScope;
     this.clientPromise = session.clientPromise;
+  }
+
+  private requireRuntime(): ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never> {
+    if (!this.runtime) throw new Error("Transport runtime not ready");
+    return this.runtime;
   }
 
   async request<T = unknown>(
@@ -186,7 +198,7 @@ export class WsTransport {
       >
     )[method];
     if (!call) throw new WsTransportRpcError({ message: `Unknown RPC method: ${method}` });
-    return (await this.runtime.runPromise(call(normalizedRpcInput))) as T;
+    return (await this.requireRuntime().runPromise(call(normalizedRpcInput))) as T;
   }
 
   subscribe<C extends WsPushChannel>(
@@ -250,22 +262,31 @@ export class WsTransport {
     // handled before closing the runtime so test/browser teardown stays quiet.
     void this.clientPromise.catch(() => undefined);
     void this.reconnectPromise?.catch(() => undefined);
-    const runtime = this.runtime;
-    const clientScope = this.clientScope;
-    void runtime
-      .runPromise(Scope.close(clientScope, Exit.void))
-      .catch(() => undefined)
-      .finally(() => {
-        runtime.dispose();
-      });
+    const ready = this.sessionReady;
+    void ready
+      ?.then(({ runtime, clientScope }) =>
+        runtime.runPromise(Scope.close(clientScope, Exit.void)).finally(() => runtime.dispose()),
+      )
+      .catch(() => undefined);
   }
 
   private createSession() {
     const sessionVersion = ++this.sessionVersion;
-    const runtime = ManagedRuntime.make(makeProtocolLayer(makeSocketUrl(this.explicitUrl)));
-    const clientScope = runtime.runSync(Scope.make());
-    const clientPromise = runtime
-      .runPromise(Scope.provide(clientScope)(makeRpcClient))
+    const sessionReady = this.resolveUrl().then((url) => {
+      const runtime = ManagedRuntime.make(makeProtocolLayer(url));
+      const clientScope = runtime.runSync(Scope.make());
+      if (!this.disposed && this.sessionVersion === sessionVersion) {
+        this.runtime = runtime;
+        this.clientScope = clientScope;
+      }
+      return { runtime, clientScope };
+    });
+    this.sessionReady = sessionReady;
+
+    const clientPromise = sessionReady
+      .then(({ runtime, clientScope }) =>
+        runtime.runPromise(Scope.provide(clientScope)(makeRpcClient)),
+      )
       .then((client) => {
         if (!this.disposed && this.sessionVersion === sessionVersion) {
           this.setState("open");
@@ -278,7 +299,7 @@ export class WsTransport {
         }
         throw error;
       });
-    return { runtime, clientScope, clientPromise };
+    return { clientPromise };
   }
 
   private async getClient(): Promise<RpcClientInstance> {
@@ -293,20 +314,18 @@ export class WsTransport {
   private reconnect(): Promise<RpcClientInstance> {
     if (this.reconnectPromise) return this.reconnectPromise;
 
-    const oldRuntime = this.runtime;
-    const oldClientScope = this.clientScope;
+    const oldReady = this.sessionReady;
     for (const cleanup of this.streamCleanups.values()) cleanup();
     this.streamCleanups.clear();
     this.stoppingStreams.clear();
 
     this.setState("connecting");
 
-    void oldRuntime
-      .runPromise(Scope.close(oldClientScope, Exit.void))
-      .catch(() => undefined)
-      .finally(() => {
-        oldRuntime.dispose();
-      });
+    void oldReady
+      ?.then(({ runtime, clientScope }) =>
+        runtime.runPromise(Scope.close(clientScope, Exit.void)).finally(() => runtime.dispose()),
+      )
+      .catch(() => undefined);
 
     this.reconnectPromise = this.openReconnectSession().finally(() => {
       this.reconnectPromise = null;
@@ -332,8 +351,6 @@ export class WsTransport {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
 
     const session = this.createSession();
-    this.runtime = session.runtime;
-    this.clientScope = session.clientScope;
     this.clientPromise = session.clientPromise;
 
     const client = await session.clientPromise;
@@ -530,7 +547,7 @@ export class WsTransport {
   ): void {
     if (this.streamCleanups.has(key)) return;
     const runnableStream = stream as Stream.Stream<T, WsTransportRpcError, never>;
-    const cancel = this.runtime.runCallback(
+    const cancel = this.requireRuntime().runCallback(
       Stream.runForEach(runnableStream, (event) => Effect.sync(() => listener(event))),
       {
         onExit: (exit) => {
@@ -576,7 +593,7 @@ export class WsTransport {
     params: unknown,
   ): Promise<GitRunStackedActionResult> {
     let result: GitRunStackedActionResult | null = null;
-    await this.runtime.runPromise(
+    await this.requireRuntime().runPromise(
       Stream.runForEach(client[WS_METHODS.gitRunStackedAction](params as never), (event) =>
         Effect.sync(() => {
           this.emit(WS_CHANNELS.gitActionProgress, event as GitActionProgressEvent);
