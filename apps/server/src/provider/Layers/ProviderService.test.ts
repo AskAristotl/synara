@@ -43,6 +43,23 @@ import {
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
+import { ServerConfig } from "../../config.ts";
+import {
+  SessionTokenRegistry,
+  SessionTokenRegistryLive,
+} from "../../subagentMcp/SessionTokenRegistry.ts";
+import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/httpTransport.ts";
+
+// `ProviderServiceLive` depends on `SessionTokenRegistry` + `ServerConfig` to
+// mint the sub-agent MCP bearer token/URL every `startSession` attaches
+// (see ProviderService.ts). Every fixture in this file that builds a fully
+// resolvable ProviderService layer needs both, so centralize them here rather
+// than repeating the same two standalone deps at each construction site.
+const providerServiceTestSupportLayer = () =>
+  Layer.mergeAll(
+    SessionTokenRegistryLive,
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-provider-service-cfg-" }),
+  ).pipe(Layer.provide(NodeServices.layer));
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
@@ -307,6 +324,9 @@ function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServic
     Layer.provide(SqlitePersistenceMemory),
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+    prefix: "t3-provider-service-cfg-",
+  }).pipe(Layer.provide(NodeServices.layer));
 
   const layer = it.layer(
     Layer.mergeAll(
@@ -314,10 +334,18 @@ function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServic
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(SessionTokenRegistryLive),
+        Layer.provide(serverConfigLayer),
       ),
       directoryLayer,
 
       runtimeRepositoryLayer,
+      // Exposed as a top-level sibling (not just hidden inside the
+      // ProviderServiceLive pipe above) so tests can resolve the tokens
+      // ProviderServiceLive mints at startSession. Effect's layer memoMap
+      // dedupes the shared `SessionTokenRegistryLive` reference, so this is
+      // the same registry instance ProviderServiceLive uses internally.
+      SessionTokenRegistryLive,
       NodeServices.layer,
     ),
   );
@@ -362,6 +390,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
       Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
       Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(providerServiceTestSupportLayer()),
     );
 
     yield* Effect.gen(function* () {
@@ -434,6 +463,7 @@ it.effect(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
         Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       yield* Effect.gen(function* () {
@@ -497,6 +527,7 @@ it.effect(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
       const updatedResumeCursor = {
         threadId: asThreadId("thread-1"),
@@ -548,6 +579,7 @@ it.effect(
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       secondCodex.startSession.mockClear();
@@ -659,6 +691,96 @@ routing.layer("ProviderServiceLive routing", (it) => {
           issue: `Cannot route thread '${session.threadId}' because no persisted provider binding exists.`,
         }),
       );
+    }),
+  );
+
+  it.effect("forwards a canSpawn:true sub-agent MCP token to the adapter for a root thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sessionTokens = yield* SessionTokenRegistry;
+      const threadId = asThreadId("thread-subagent-mcp-root");
+
+      routing.codex.startSession.mockClear();
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        canSpawn: true,
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      const startInput = routing.codex.startSession.mock.calls[0]?.[0] as
+        | ProviderSessionStartInput
+        | undefined;
+      assert.equal(typeof startInput === "object" && startInput !== null, true);
+      const subagentMcp = startInput?.subagentMcp;
+      assert.equal(typeof subagentMcp === "object" && subagentMcp !== null, true);
+      assert.equal(subagentMcp?.url.endsWith(SUBAGENT_MCP_ROUTE_PATH), true);
+      assert.equal(typeof subagentMcp?.token === "string" && subagentMcp.token.length > 0, true);
+
+      const identity = yield* sessionTokens.resolve(subagentMcp!.token);
+      assert.equal(Option.isSome(identity), true);
+      if (Option.isSome(identity)) {
+        assert.equal(identity.value.threadId, threadId);
+        assert.equal(identity.value.canSpawn, true);
+      }
+    }),
+  );
+
+  it.effect(
+    "forwards a canSpawn:false sub-agent MCP token to the adapter when canSpawn is omitted",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const sessionTokens = yield* SessionTokenRegistry;
+        const threadId = asThreadId("thread-subagent-mcp-child");
+
+        routing.codex.startSession.mockClear();
+        yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+        });
+
+        const startInput = routing.codex.startSession.mock.calls[0]?.[0] as
+          | ProviderSessionStartInput
+          | undefined;
+        const token = startInput?.subagentMcp?.token;
+        assert.equal(typeof token === "string" && token.length > 0, true);
+
+        const identity = yield* sessionTokens.resolve(token!);
+        assert.equal(Option.isSome(identity), true);
+        if (Option.isSome(identity)) {
+          assert.equal(identity.value.threadId, threadId);
+          assert.equal(identity.value.canSpawn, false);
+        }
+      }),
+  );
+
+  it.effect("revokes the sub-agent MCP token once stopSession completes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sessionTokens = yield* SessionTokenRegistry;
+      const threadId = asThreadId("thread-subagent-mcp-revoke");
+
+      routing.codex.startSession.mockClear();
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        canSpawn: true,
+      });
+      const startInput = routing.codex.startSession.mock.calls[0]?.[0] as
+        | ProviderSessionStartInput
+        | undefined;
+      const token = startInput?.subagentMcp?.token;
+      assert.equal(typeof token === "string" && token.length > 0, true);
+      assert.equal(Option.isSome(yield* sessionTokens.resolve(token!)), true);
+
+      yield* provider.stopSession({ threadId });
+
+      const identityAfterStop = yield* sessionTokens.resolve(token!);
+      assert.equal(Option.isSome(identityAfterStop), false);
     }),
   );
 
@@ -1189,6 +1311,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       const initial = yield* Effect.gen(function* () {
@@ -1221,6 +1344,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       secondClaude.startSession.mockClear();
@@ -1285,6 +1409,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       const initial = yield* Effect.gen(function* () {
@@ -1318,6 +1443,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       yield* Effect.gen(function* () {
@@ -1376,6 +1502,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, firstRegistry)),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       const initial = yield* Effect.gen(function* () {
@@ -1411,6 +1538,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         Layer.provide(Layer.succeed(ProviderAdapterRegistry, secondRegistry)),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(providerServiceTestSupportLayer()),
       );
 
       yield* Effect.gen(function* () {

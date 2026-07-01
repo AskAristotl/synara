@@ -698,6 +698,9 @@ const make = Effect.gen(function* () {
           : {}),
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
+        // A thread with a parentThreadId is a sub-agent thread; only
+        // root/human-initiated threads may spawn further sub-agents.
+        canSpawn: thread.parentThreadId == null,
       });
 
     const bindSessionToThread = (session: ProviderSession) =>

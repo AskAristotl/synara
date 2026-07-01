@@ -49,6 +49,19 @@ export const ProviderSession = Schema.Struct({
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
+/**
+ * ProviderSubagentMcpConfig - Loopback sub-agent MCP endpoint + bearer token
+ * handed to a provider session at start so its adapter can wire spawn_agent /
+ * wait / send_message / stop_agent tool calls back to the sub-agent MCP
+ * server (see docs/superpowers/specs/2026-06-30-cross-model-agents-design.md
+ * §3.2/§3.3). Populated by `ProviderService`, consumed by provider adapters.
+ */
+export const ProviderSubagentMcpConfig = Schema.Struct({
+  url: TrimmedNonEmptyString,
+  token: TrimmedNonEmptyString,
+});
+export type ProviderSubagentMcpConfig = typeof ProviderSubagentMcpConfig.Type;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderKind),
@@ -59,6 +72,18 @@ export const ProviderSessionStartInput = Schema.Struct({
   sandboxMode: Schema.optional(ProviderSandboxMode),
   providerOptions: Schema.optional(ProviderStartOptions),
   runtimeMode: RuntimeMode,
+  /**
+   * Whether this session may spawn sub-agents: true for a root/human-initiated
+   * thread, false for a sub-agent thread. Set by the caller (orchestration
+   * side) from `parentThreadId == null`. Absent is treated as `false` — only
+   * explicitly-root sessions can spawn.
+   */
+  canSpawn: Schema.optional(Schema.Boolean),
+  /**
+   * Sub-agent MCP endpoint + bearer token for this session. Populated by
+   * `ProviderService.startSession`, not supplied by callers.
+   */
+  subagentMcp: Schema.optional(ProviderSubagentMcpConfig),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 

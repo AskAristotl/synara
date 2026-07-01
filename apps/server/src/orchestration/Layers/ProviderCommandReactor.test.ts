@@ -1052,6 +1052,9 @@ describe("ProviderCommandReactor", () => {
         model: "gpt-5-codex",
       },
       runtimeMode: "approval-required",
+      // thread-1 has no parentThreadId, so it's a root/human-initiated thread
+      // and may spawn sub-agents.
+      canSpawn: true,
     });
 
     const readModel = await Effect.runPromise(harness.engine.getReadModel());
@@ -2973,6 +2976,57 @@ describe("ProviderCommandReactor", () => {
       threadId: "thread-1",
       turnId: "turn-child",
       providerThreadId: "child-provider-1",
+    });
+  });
+
+  it("starts a sub-agent thread's provider session with canSpawn:false", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    const subagentThreadId = ThreadId.makeUnsafe("subagent:thread-1:child-provider-2");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-create-subagent-canspawn"),
+        threadId: subagentThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Halley [explorer]",
+        modelSelection: {
+          provider: "codex",
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        parentThreadId: ThreadId.makeUnsafe("thread-1"),
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-subagent-canspawn"),
+        threadId: subagentThreadId,
+        message: {
+          messageId: asMessageId("user-message-subagent-canspawn"),
+          role: "user",
+          text: "hello from a sub-agent",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[0]).toEqual(subagentThreadId);
+    // A thread with a parentThreadId is a sub-agent thread and must not be
+    // able to spawn further sub-agents.
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      canSpawn: false,
     });
   });
 

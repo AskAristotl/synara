@@ -39,6 +39,9 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
+import { ServerConfig } from "../../config.ts";
+import { SessionTokenRegistry } from "../../subagentMcp/SessionTokenRegistry.ts";
+import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/httpTransport.ts";
 
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogPath?: string;
@@ -242,6 +245,8 @@ function runtimeLastErrorForEvent(event: ProviderRuntimeEvent): string | null | 
 const makeProviderService = (options?: ProviderServiceLiveOptions) =>
   Effect.gen(function* () {
     const analytics = yield* Effect.service(AnalyticsService);
+    const sessionTokens = yield* SessionTokenRegistry;
+    const serverConfig = yield* ServerConfig;
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -690,12 +695,24 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             ? readPersistedProviderOptions(persistedBinding.runtimePayload)
             : undefined);
         const adapter = yield* registry.getByProvider(input.provider);
+        // Every session gets its own bearer token for the sub-agent MCP loopback
+        // endpoint; canSpawn (root vs. sub-agent thread) is decided by the caller
+        // (orchestration side) and defaults to false when absent so only
+        // explicitly-root sessions can spawn children.
+        const subagentMcpToken = yield* sessionTokens.issueToken(threadId, {
+          canSpawn: input.canSpawn ?? false,
+        });
+        const subagentMcp = {
+          url: `http://127.0.0.1:${serverConfig.port}${SUBAGENT_MCP_ROUTE_PATH}`,
+          token: subagentMcpToken,
+        };
         const session = yield* adapter.startSession({
           ...input,
           ...(effectiveProviderOptions !== undefined
             ? { providerOptions: effectiveProviderOptions }
             : {}),
           ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
+          subagentMcp,
         });
 
         if (session.provider !== adapter.provider) {
@@ -1059,6 +1076,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         yield* waitForRuntimeIdleStop(input.threadId);
         yield* directory.remove(input.threadId);
         retireRuntimeIdleGeneration(input.threadId);
+        // The session is gone for good (its binding is removed), so its
+        // sub-agent MCP bearer token(s) must not keep resolving to a caller
+        // identity that no longer has a live or resumable session.
+        yield* sessionTokens.revoke(input.threadId);
         yield* analytics.record("provider.session.stopped", {
           provider: routed.adapter.provider,
         });

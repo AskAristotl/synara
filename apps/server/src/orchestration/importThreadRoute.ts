@@ -356,6 +356,9 @@ export function makeImportThreadHandler(options: ImportThreadHandlerOptions) {
             ? { openCodeSessionId: externalId }
             : { threadId: externalId },
       runtimeMode: thread.runtimeMode,
+      // A thread with a parentThreadId is a sub-agent thread; only
+      // root/human-initiated threads may spawn further sub-agents.
+      canSpawn: thread.parentThreadId == null,
     });
 
     if (thread.modelSelection.provider === "codex") {

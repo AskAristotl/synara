@@ -23,6 +23,7 @@ import { ProviderDiscoveryService } from "./Services/ProviderDiscoveryService";
 import { ProviderService } from "./Services/ProviderService";
 import { ProviderSessionDirectory } from "./Services/ProviderSessionDirectory";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime";
+import { SessionTokenRegistryLive } from "../subagentMcp/SessionTokenRegistry";
 
 export function makeServerProviderLayer(): Layer.Layer<
   ProviderService | ProviderDiscoveryService | ProviderAdapterRegistry | ProviderSessionDirectory,
@@ -86,7 +87,15 @@ export function makeServerProviderLayer(): Layer.Layer<
     );
     const providerServiceLayer = makeProviderServiceLive(
       canonicalEventLogger ? { canonicalEventLogger } : undefined,
-    ).pipe(Layer.provide(adapterRegistryLayer), Layer.provide(providerSessionDirectoryLayer));
+    ).pipe(
+      Layer.provide(adapterRegistryLayer),
+      Layer.provide(providerSessionDirectoryLayer),
+      // Same `SessionTokenRegistryLive` instance referenced by
+      // `makeServerRuntimeServicesLayer()` (serverLayers.ts) -- Effect's layer
+      // memoMap dedupes construction of the same Layer reference, so both
+      // ProviderService and the sub-agent MCP HTTP route share one registry.
+      Layer.provide(SessionTokenRegistryLive),
+    );
     const providerDiscoveryLayer = ProviderDiscoveryServiceLive.pipe(
       Layer.provide(adapterRegistryLayer),
       // Skill toggles live in server settings; the shared ServerSettingsLive
