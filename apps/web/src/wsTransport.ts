@@ -25,7 +25,7 @@ import {
   type WsPushChannel,
   type WsPushMessage,
 } from "@t3tools/contracts";
-import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Scope, Stream } from "effect";
+import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Schedule, Scope, Stream } from "effect";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
@@ -70,7 +70,10 @@ function makeProtocolLayer(url: string) {
   // JSON keeps the wire format symmetric with any server build: a serialization
   // mismatch on this single multiplexed socket is a hard connect failure, and the
   // desktop/dev setup routinely runs web and server on independently-built copies.
-  return RpcClient.layerProtocolSocket().pipe(
+  // The protocol's built-in dial retry is disabled: it would redial forever with
+  // this session's frozen URL (whose one-time wsToken expires after 5 minutes).
+  // WsTransport owns reconnection and mints a fresh token per session.
+  return RpcClient.layerProtocolSocket({ retryPolicy: Schedule.recurs(0) }).pipe(
     Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson)),
   );
 }
@@ -111,6 +114,8 @@ export function shouldKeepServerLifecycleStream(activeChannels: ReadonlySet<stri
     activeChannels.has(WS_CHANNELS.serverMaintenanceUpdated)
   );
 }
+
+const CONNECT_PROBE_TIMEOUT_MS = 10_000;
 
 export class WsTransport {
   private readonly resolveUrl: () => Promise<string>;
@@ -270,6 +275,37 @@ export class WsTransport {
       .catch(() => undefined);
   }
 
+  // A resolved RPC client only proves the plumbing was built — the socket dials
+  // lazily. Round-trip a cheap RPC so "open" reflects real connectivity.
+  private probeConnection(
+    runtime: ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never>,
+    client: RpcClientInstance,
+  ): Promise<void> {
+    const call = (
+      client as unknown as Record<
+        string,
+        (input: unknown) => Effect.Effect<unknown, unknown, never>
+      >
+    )[WS_METHODS.serverGetSettings];
+    if (!call) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timed out waiting for the host connection probe.")),
+        CONNECT_PROBE_TIMEOUT_MS,
+      );
+      runtime.runPromise(call({})).then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+  }
+
   private createSession() {
     const sessionVersion = ++this.sessionVersion;
     const sessionReady = this.resolveUrl().then((url) => {
@@ -284,9 +320,11 @@ export class WsTransport {
     this.sessionReady = sessionReady;
 
     const clientPromise = sessionReady
-      .then(({ runtime, clientScope }) =>
-        runtime.runPromise(Scope.provide(clientScope)(makeRpcClient)),
-      )
+      .then(async ({ runtime, clientScope }) => {
+        const client = await runtime.runPromise(Scope.provide(clientScope)(makeRpcClient));
+        await this.probeConnection(runtime, client);
+        return client;
+      })
       .then((client) => {
         if (!this.disposed && this.sessionVersion === sessionVersion) {
           this.setState("open");
