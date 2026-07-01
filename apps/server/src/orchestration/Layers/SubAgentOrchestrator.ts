@@ -788,167 +788,169 @@ export const SubAgentOrchestratorLive = Layer.effect(
             const timeoutSeconds = clampWaitSeconds(
               input.timeoutSeconds ?? SUBAGENT_WAIT_MAX_SECONDS,
             );
-          // The single absolute deadline this whole `wait` call is bounded
-          // by -- both step 4's overall resolution wait AND (Task 4.3b) each
-          // worktree child's post-completion checkpoint settle are clamped
-          // against this SAME instant, so settling never extends `wait`'s
-          // total bound past the caller's (clamped) `timeoutSeconds`.
-          const waitDeadlineMillis = Date.now() + timeoutSeconds * 1000;
-          const mode = input.mode ?? "all";
-          const agentIds = input.agentIds;
-          const targetIds = new Set<string>(agentIds);
+            // The single absolute deadline this whole `wait` call is bounded
+            // by -- both step 4's overall resolution wait AND (Task 4.3b) each
+            // worktree child's post-completion checkpoint settle are clamped
+            // against this SAME instant, so settling never extends `wait`'s
+            // total bound past the caller's (clamped) `timeoutSeconds`.
+            const waitDeadlineMillis = Date.now() + timeoutSeconds * 1000;
+            const mode = input.mode ?? "all";
+            const agentIds = input.agentIds;
+            const targetIds = new Set<string>(agentIds);
 
-          // Per-child resolution state. Effect fibers run cooperatively on one
-          // thread and every apply below is synchronous (no await mid-mutation),
-          // so plain mutable structures are race-free here.
-          const outcomes = new Map<string, SubAgentTerminalOutcome>();
-          const observedRunning = new Set<string>();
+            // Per-child resolution state. Effect fibers run cooperatively on one
+            // thread and every apply below is synchronous (no await mid-mutation),
+            // so plain mutable structures are race-free here.
+            const outcomes = new Map<string, SubAgentTerminalOutcome>();
+            const observedRunning = new Set<string>();
 
-          // First terminal outcome wins and is stable (later events are ignored).
-          const resolveOutcome = (agentId: string, outcome: SubAgentTerminalOutcome): void => {
-            if (!outcomes.has(agentId)) {
-              outcomes.set(agentId, outcome);
-            }
-          };
-          const applySession = (agentId: string, session: OrchestrationSession | null): void => {
-            if (session?.status === "running") {
-              observedRunning.add(agentId);
-            }
-            const outcome = classifySession(session, observedRunning.has(agentId));
-            if (outcome !== null) {
-              resolveOutcome(agentId, outcome);
-            }
-          };
-          const isResolved = (): boolean =>
-            mode === "any"
-              ? agentIds.some((agentId) => outcomes.has(agentId))
-              : agentIds.every((agentId) => outcomes.has(agentId));
-
-          const done = yield* Deferred.make<void>();
-          const signalIfResolved = Effect.suspend(() =>
-            isResolved() ? Deferred.succeed(done, undefined) : Effect.succeed(false),
-          );
-
-          // 1. Subscribe to the domain-event PubSub BEFORE snapshotting so a
-          //    terminal event that fires in the seed gap is not lost.
-          //    `engine.subscribeDomainEvents` is `PubSub.subscribe` under the
-          //    hood (see `Layers/OrchestrationEngine.ts`), which registers
-          //    the subscription synchronously the moment this effect is
-          //    run — right here, before any `yield*` below can suspend this
-          //    fiber on a SQL read. This is deliberately NOT
-          //    `Stream.toPull(engine.streamDomainEvents)`: `streamDomainEvents`
-          //    is `Stream.fromPubSub`, and `Stream.toPull` on it defers the
-          //    actual `PubSub.subscribe` call inside an `Effect.suspend` that
-          //    only fires on the FIRST pull (see `effect`'s `Channel.unwrap`)
-          //    — which would happen inside the drain fiber forked in step 3,
-          //    AFTER the seed loop, so any event published during the seed
-          //    loop's SQL reads would be silently dropped. Subscribing here
-          //    instead means nothing published from this point on can be
-          //    missed: the subscription (not our later consumption of it) is
-          //    what determines what gets buffered.
-          //
-          //    Consumption is intentionally NOT started yet (step 3, after the
-          //    seed loop) even though the subscription itself is already
-          //    live: an event applied before the seed loop has populated
-          //    `observedRunning` for an already-running child would see
-          //    `hasRun === false` and wrongly fail to resolve it. Draining
-          //    after the seed loop guarantees every buffered event is applied
-          //    against a fully-seeded `observedRunning`/`outcomes` state.
-          const domainEventSubscription = yield* engine.subscribeDomainEvents;
-
-          // 2. Seed each child's current state. A child may already be terminal
-          //    at seed time — resolve it immediately rather than hang.
-          for (const agentId of agentIds) {
-            const threadOption = yield* readChildThread(agentId);
-            if (Option.isNone(threadOption)) {
-              return yield* Effect.fail(
-                new SubAgentError({
-                  reason: "unknown-agent",
-                  detail: `No sub-agent thread found for agentId '${agentId}'.`,
-                }),
-              );
-            }
-            const thread = threadOption.value;
-            // Seed run-evidence, gating the idle/ready -> completed transition
-            // below: latestTurn starts null at thread.create (projector.ts's
-            // "thread.created" case) and is populated only as a byproduct of
-            // turn/checkpoint activity — not just a "running" thread.session-set,
-            // but also thread.turn-diff-completed, thread.reverted, and
-            // thread.conversation-rolled-back (see projector.ts) — none of
-            // which fire before the child's first turn has actually run. So a
-            // non-null latestTurn still proves the session has run at least
-            // once; an assistant message is an independent signal for the
-            // same fact (the provider has produced output). Either is
-            // sufficient. A bare seed idle/starting with NEITHER — a
-            // freshly-spawned, not-yet-run child — has no run evidence and
-            // must NOT be mistaken for a finished turn.
-            const hasAssistantMessage = thread.messages.some(
-              (message) => message.role === "assistant",
-            );
-            if (thread.latestTurn !== null || hasAssistantMessage) {
-              observedRunning.add(agentId);
-            }
-            applySession(agentId, thread.session);
-            if (!outcomes.has(agentId) && thread.latestTurn?.state === "completed") {
-              resolveOutcome(agentId, "completed");
-            }
-          }
-          yield* signalIfResolved;
-
-          // 3. NOW drain the already-subscribed event stream in the
-          //    background: any events buffered since step 1 (including one
-          //    that raced the seed loop) are applied first, in order, followed
-          //    by any future events. `{ startImmediately: true }` starts this
-          //    fiber synchronously (no scheduler round-trip) since the seed
-          //    loop has already run, so it is always safe here. The loop needs
-          //    no explicit exit condition: `Effect.scoped` (wrapping this
-          //    whole generator) interrupts this forked fiber — and tears down
-          //    the subscription acquired in step 1 — the moment `wait`
-          //    returns, whether via resolution or timeout.
-          yield* Effect.forkScoped(
-            Effect.gen(function* () {
-              while (true) {
-                const event = yield* PubSub.take(domainEventSubscription);
-                applyDomainEvent(event, targetIds, applySession);
-                yield* signalIfResolved;
+            // First terminal outcome wins and is stable (later events are ignored).
+            const resolveOutcome = (agentId: string, outcome: SubAgentTerminalOutcome): void => {
+              if (!outcomes.has(agentId)) {
+                outcomes.set(agentId, outcome);
               }
-            }),
-            { startImmediately: true },
-          );
+            };
+            const applySession = (agentId: string, session: OrchestrationSession | null): void => {
+              if (session?.status === "running") {
+                observedRunning.add(agentId);
+              }
+              const outcome = classifySession(session, observedRunning.has(agentId));
+              if (outcome !== null) {
+                resolveOutcome(agentId, outcome);
+              }
+            };
+            const isResolved = (): boolean =>
+              mode === "any"
+                ? agentIds.some((agentId) => outcomes.has(agentId))
+                : agentIds.every((agentId) => outcomes.has(agentId));
 
-          // 4. Block until the resolution predicate holds or the timeout elapses.
-          //    On timeout, still-unresolved children fall through to "running".
-          yield* Deferred.await(done).pipe(Effect.timeoutOption(Duration.seconds(timeoutSeconds)));
-
-          // 5. Build one envelope per agentId, in input order, from a fresh read.
-          //    (Task 4.3b) A worktree child that just resolved "completed"
-          //    gets one extra step here: settleForFileBearingCheckpoint
-          //    briefly polls for its file-bearing checkpoint (bounded by
-          //    waitDeadlineMillis) before the envelope is built, so `diff`
-          //    isn't usually null for the mainline worktree pattern. Every
-          //    other child (share/local, failed, interrupted, still running)
-          //    is a same-tick no-op passthrough -- no behavior change.
-          const results: SubAgentResult[] = [];
-          for (const agentId of agentIds) {
-            const threadOption = yield* readChildThread(agentId);
-            if (Option.isNone(threadOption)) {
-              return yield* Effect.fail(
-                new SubAgentError({
-                  reason: "unknown-agent",
-                  detail: `No sub-agent thread found for agentId '${agentId}'.`,
-                }),
-              );
-            }
-            const outcome = outcomes.get(agentId) ?? null;
-            const thread = yield* settleForFileBearingCheckpoint(
-              agentId,
-              threadOption.value,
-              outcome,
-              waitDeadlineMillis,
+            const done = yield* Deferred.make<void>();
+            const signalIfResolved = Effect.suspend(() =>
+              isResolved() ? Deferred.succeed(done, undefined) : Effect.succeed(false),
             );
-            results.push(buildSubAgentResult(agentId, thread, outcome));
-          }
-          return results;
+
+            // 1. Subscribe to the domain-event PubSub BEFORE snapshotting so a
+            //    terminal event that fires in the seed gap is not lost.
+            //    `engine.subscribeDomainEvents` is `PubSub.subscribe` under the
+            //    hood (see `Layers/OrchestrationEngine.ts`), which registers
+            //    the subscription synchronously the moment this effect is
+            //    run — right here, before any `yield*` below can suspend this
+            //    fiber on a SQL read. This is deliberately NOT
+            //    `Stream.toPull(engine.streamDomainEvents)`: `streamDomainEvents`
+            //    is `Stream.fromPubSub`, and `Stream.toPull` on it defers the
+            //    actual `PubSub.subscribe` call inside an `Effect.suspend` that
+            //    only fires on the FIRST pull (see `effect`'s `Channel.unwrap`)
+            //    — which would happen inside the drain fiber forked in step 3,
+            //    AFTER the seed loop, so any event published during the seed
+            //    loop's SQL reads would be silently dropped. Subscribing here
+            //    instead means nothing published from this point on can be
+            //    missed: the subscription (not our later consumption of it) is
+            //    what determines what gets buffered.
+            //
+            //    Consumption is intentionally NOT started yet (step 3, after the
+            //    seed loop) even though the subscription itself is already
+            //    live: an event applied before the seed loop has populated
+            //    `observedRunning` for an already-running child would see
+            //    `hasRun === false` and wrongly fail to resolve it. Draining
+            //    after the seed loop guarantees every buffered event is applied
+            //    against a fully-seeded `observedRunning`/`outcomes` state.
+            const domainEventSubscription = yield* engine.subscribeDomainEvents;
+
+            // 2. Seed each child's current state. A child may already be terminal
+            //    at seed time — resolve it immediately rather than hang.
+            for (const agentId of agentIds) {
+              const threadOption = yield* readChildThread(agentId);
+              if (Option.isNone(threadOption)) {
+                return yield* Effect.fail(
+                  new SubAgentError({
+                    reason: "unknown-agent",
+                    detail: `No sub-agent thread found for agentId '${agentId}'.`,
+                  }),
+                );
+              }
+              const thread = threadOption.value;
+              // Seed run-evidence, gating the idle/ready -> completed transition
+              // below: latestTurn starts null at thread.create (projector.ts's
+              // "thread.created" case) and is populated only as a byproduct of
+              // turn/checkpoint activity — not just a "running" thread.session-set,
+              // but also thread.turn-diff-completed, thread.reverted, and
+              // thread.conversation-rolled-back (see projector.ts) — none of
+              // which fire before the child's first turn has actually run. So a
+              // non-null latestTurn still proves the session has run at least
+              // once; an assistant message is an independent signal for the
+              // same fact (the provider has produced output). Either is
+              // sufficient. A bare seed idle/starting with NEITHER — a
+              // freshly-spawned, not-yet-run child — has no run evidence and
+              // must NOT be mistaken for a finished turn.
+              const hasAssistantMessage = thread.messages.some(
+                (message) => message.role === "assistant",
+              );
+              if (thread.latestTurn !== null || hasAssistantMessage) {
+                observedRunning.add(agentId);
+              }
+              applySession(agentId, thread.session);
+              if (!outcomes.has(agentId) && thread.latestTurn?.state === "completed") {
+                resolveOutcome(agentId, "completed");
+              }
+            }
+            yield* signalIfResolved;
+
+            // 3. NOW drain the already-subscribed event stream in the
+            //    background: any events buffered since step 1 (including one
+            //    that raced the seed loop) are applied first, in order, followed
+            //    by any future events. `{ startImmediately: true }` starts this
+            //    fiber synchronously (no scheduler round-trip) since the seed
+            //    loop has already run, so it is always safe here. The loop needs
+            //    no explicit exit condition: `Effect.scoped` (wrapping this
+            //    whole generator) interrupts this forked fiber — and tears down
+            //    the subscription acquired in step 1 — the moment `wait`
+            //    returns, whether via resolution or timeout.
+            yield* Effect.forkScoped(
+              Effect.gen(function* () {
+                while (true) {
+                  const event = yield* PubSub.take(domainEventSubscription);
+                  applyDomainEvent(event, targetIds, applySession);
+                  yield* signalIfResolved;
+                }
+              }),
+              { startImmediately: true },
+            );
+
+            // 4. Block until the resolution predicate holds or the timeout elapses.
+            //    On timeout, still-unresolved children fall through to "running".
+            yield* Deferred.await(done).pipe(
+              Effect.timeoutOption(Duration.seconds(timeoutSeconds)),
+            );
+
+            // 5. Build one envelope per agentId, in input order, from a fresh read.
+            //    (Task 4.3b) A worktree child that just resolved "completed"
+            //    gets one extra step here: settleForFileBearingCheckpoint
+            //    briefly polls for its file-bearing checkpoint (bounded by
+            //    waitDeadlineMillis) before the envelope is built, so `diff`
+            //    isn't usually null for the mainline worktree pattern. Every
+            //    other child (share/local, failed, interrupted, still running)
+            //    is a same-tick no-op passthrough -- no behavior change.
+            const results: SubAgentResult[] = [];
+            for (const agentId of agentIds) {
+              const threadOption = yield* readChildThread(agentId);
+              if (Option.isNone(threadOption)) {
+                return yield* Effect.fail(
+                  new SubAgentError({
+                    reason: "unknown-agent",
+                    detail: `No sub-agent thread found for agentId '${agentId}'.`,
+                  }),
+                );
+              }
+              const outcome = outcomes.get(agentId) ?? null;
+              const thread = yield* settleForFileBearingCheckpoint(
+                agentId,
+                threadOption.value,
+                outcome,
+                waitDeadlineMillis,
+              );
+              results.push(buildSubAgentResult(agentId, thread, outcome));
+            }
+            return results;
           }),
         );
       });

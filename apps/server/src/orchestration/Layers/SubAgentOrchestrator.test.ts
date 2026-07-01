@@ -288,7 +288,9 @@ function turnDiffCompletedEvent(threadId: ThreadId): OrchestrationEvent {
  * `"not-owner"` test can assert the ownership check short-circuits BEFORE
  * `wait` ever subscribes to the domain-event stream.
  */
-function buildWaitHarness(caller: SubAgentCaller = { threadId: ThreadId.makeUnsafe(randomUUID()) }) {
+function buildWaitHarness(
+  caller: SubAgentCaller = { threadId: ThreadId.makeUnsafe(randomUUID()) },
+) {
   const eventPubSub = Effect.runSync(PubSub.unbounded<OrchestrationEvent>({ replay: 16 }));
   const threads = new Map<string, OrchestrationThread>();
   let subscribeCalls = 0;
@@ -1503,7 +1505,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results).toHaveLength(1);
@@ -1549,7 +1554,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results).toHaveLength(1);
@@ -1581,7 +1589,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // timeoutSeconds clamps to 1s (PositiveInt floor) — the call returns rather
       // than hanging for the 600s default.
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
 
       expect(results).toHaveLength(1);
@@ -1614,7 +1625,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // timeoutSeconds clamps to 1s (PositiveInt floor) — proves it returns
       // "running" rather than hanging or wrongly resolving "completed".
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
 
       expect(results).toHaveLength(1);
@@ -1644,7 +1658,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -1916,7 +1933,10 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // through to "running". This is the assertion that distinguishes fixed
       // from broken.
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
       const elapsedMs = Date.now() - startedAt;
 
@@ -1963,7 +1983,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -2009,7 +2032,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results[0]?.diff).toEqual({
@@ -2048,7 +2074,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -2085,7 +2114,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
       // a small overall timeout clamps that settle window down to ~1s
       // instead of the full SUBAGENT_DIFF_SETTLE_SECONDS grace window.
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -2118,7 +2150,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
       // See the sibling "no checkpoints at all" test above for why
       // timeoutSeconds:1 (Task 4.3b settle interaction).
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -2154,7 +2189,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -2199,7 +2237,10 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const startedAt = Date.now();
       const waitPromise = runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 5 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 5 }),
+        ),
       );
       // Simulate CheckpointReactor's independent, concurrently-forked git I/O
       // landing the real file-bearing checkpoint shortly after -- well within
@@ -2247,7 +2288,10 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
       // already-buffered event almost instantly, so nearly the whole clamped
       // 1s budget is still "remaining" when settle starts).
       const results = await runtime.runPromise(
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 }),
+        ),
       );
       const elapsedMs = Date.now() - startedAt;
 
@@ -2286,7 +2330,10 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
         // A generous timeoutSeconds -- if the share child were (wrongly)
         // subjected to settle it would take multiple seconds; asserting a
         // tight elapsed bound below proves it wasn't.
-        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(
+          caller,
+          decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 }),
+        ),
       );
       const elapsedMs = Date.now() - startedAt;
 
