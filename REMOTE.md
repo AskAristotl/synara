@@ -117,6 +117,21 @@ directly (scan the QR code, or tap the link if it arrived some other way).
 That opens the host's `/pair` page, which redeems the link and drops you
 straight into the app, now connected to that host.
 
+### Install to your home screen (PWA)
+
+The web client is a progressive web app, so once you've opened it on a phone
+(or any browser) you can install it as a standalone app instead of living in a
+browser tab:
+
+- **iOS Safari** — Share → **Add to Home Screen**.
+- **Android Chrome** — the **Install app** prompt, or ⋮ menu → **Install app / Add to Home screen**.
+- **Desktop Chrome/Edge** — the install icon in the address bar.
+
+Installability needs the built web app served over the network (the remote
+setup above), not the local Vite dev redirect. The launched app runs
+standalone (no browser chrome) and reconnects to whatever host you last had
+active. Your paired host credentials persist across launches.
+
 ## 4) Switching the active host
 
 The **host switcher** in the sidebar header shows the active host's label and

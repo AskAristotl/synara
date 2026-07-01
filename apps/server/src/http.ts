@@ -45,6 +45,15 @@ const decodeCreatePairingCredentialInput = Schema.decodeUnknownEffect(
 const decodeRevokePairingLinkInput = Schema.decodeUnknownEffect(AuthRevokePairingLinkInput);
 const decodeRevokeClientSessionInput = Schema.decodeUnknownEffect(AuthRevokeClientSessionInput);
 
+// Content-Type for statically served files. Shared by both static-serving paths
+// (the Effect route and the legacy `serveStaticAsset`) so they cannot drift.
+// `Mime` (mime-db backed) does not reliably map `.webmanifest`, and Chrome
+// rejects a PWA manifest served as octet-stream, so special-case it here.
+function staticContentType(filePath: string): string {
+  if (filePath.endsWith(".webmanifest")) return "application/manifest+json; charset=utf-8";
+  return Mime.getType(filePath) ?? "application/octet-stream";
+}
+
 function resolveEditorIconCacheDir(config: ServerConfigShape): string {
   return nodePath.join(config.stateDir, "app-icons");
 }
@@ -722,7 +731,7 @@ const staticAndDevEffectRouteLayer = HttpRouter.add(
     if (!data) return HttpServerResponse.text("Internal Server Error", { status: 500 });
     return HttpServerResponse.uint8Array(data, {
       status: 200,
-      contentType: Mime.getType(filePath) ?? "application/octet-stream",
+      contentType: staticContentType(filePath),
     });
   }),
 );
@@ -1058,7 +1067,7 @@ const serveStaticAsset = Effect.fn(function* (input: {
     return;
   }
 
-  const contentType = Mime.getType(filePath) ?? "application/octet-stream";
+  const contentType = staticContentType(filePath);
   const data = yield* input.fileSystem
     .readFile(filePath)
     .pipe(Effect.catch(() => Effect.succeed(null)));
