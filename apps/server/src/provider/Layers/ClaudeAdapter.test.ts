@@ -325,6 +325,58 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("registers the synara MCP server when subagentMcp is provided", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+        subagentMcp: {
+          url: "http://127.0.0.1:4173/internal/subagent-mcp",
+          token: "tok",
+        },
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      const mcpServers = createInput?.options.mcpServers;
+      assert.isDefined(mcpServers);
+      const synara = mcpServers?.synara;
+      assert.isDefined(synara);
+      assert.equal(
+        synara && "url" in synara ? synara.url : undefined,
+        "http://127.0.0.1:4173/internal/subagent-mcp",
+      );
+      assert.equal(synara && "type" in synara ? synara.type : undefined, "http");
+      assert.deepEqual(synara && "headers" in synara ? synara.headers : undefined, {
+        Authorization: "Bearer tok",
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("omits the synara MCP server when subagentMcp is absent", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      const mcpServers = createInput?.options.mcpServers;
+      assert.isTrue(mcpServers === undefined || !("synara" in mcpServers));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("keeps explicit claude permission mode over runtime-derived defaults", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

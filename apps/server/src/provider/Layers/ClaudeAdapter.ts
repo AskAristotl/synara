@@ -3348,6 +3348,17 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(Object.keys(settings).length > 0 ? { settings } : {}),
           ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
           ...(newSessionId ? { sessionId: newSessionId } : {}),
+          ...(input.subagentMcp
+            ? {
+                mcpServers: {
+                  synara: {
+                    type: "http",
+                    url: input.subagentMcp.url,
+                    headers: { Authorization: `Bearer ${input.subagentMcp.token}` },
+                  },
+                },
+              }
+            : {}),
           includePartialMessages: true,
           canUseTool,
           env: claudeSdkEnv,
