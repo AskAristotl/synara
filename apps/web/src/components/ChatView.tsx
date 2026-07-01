@@ -474,6 +474,7 @@ import {
   deriveLatestRateLimitStatus,
   type RateLimitStatus,
 } from "./chat/RateLimitBanner";
+import { SubAgentBlock } from "./conversation/SubAgentBlock";
 import {
   ACTIVE_TURN_LAYOUT_SETTLE_DELAY_MS,
   appendVoiceTranscriptToPrompt,
@@ -10215,6 +10216,9 @@ export default function ChatView({
         rateLimitStatus={visibleActiveRateLimitStatus}
         onDismiss={dismissActiveRateLimitBanner}
       />
+      {!activeThread.parentThreadId ? (
+        <SubAgentBlock parentThreadId={activeThread.id} onOpenThread={onNavigateToThread} />
+      ) : null}
       {terminalWorkspaceOpen && !isEditorRail ? (
         <TerminalWorkspaceTabs
           activeTab={terminalState.workspaceActiveTab}
