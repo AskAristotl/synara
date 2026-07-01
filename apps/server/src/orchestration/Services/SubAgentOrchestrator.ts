@@ -40,7 +40,11 @@ import type { Effect } from "effect";
  * default (e.g. `pi`) — fail fast instead of dispatching a thread with a null
  * model. `"unknown-agent"` is the `wait` failure for an `agentId` that has no
  * backing thread (no envelope can be built without a provider); `"wait-failed"`
- * covers an infra read failure while collecting child state.
+ * covers an infra read failure while collecting child state. `"worktree-failed"`
+ * covers a `workspace:"worktree"` spawn (Task 4.1) that could not resolve the
+ * parent project's repo root or provision the isolated Git worktree — `spawn`
+ * fails before dispatching any command, so no half-created thread is left
+ * behind.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
@@ -48,6 +52,7 @@ export const SubAgentErrorReason = Schema.Literals([
   "dispatch-failed",
   "unknown-agent",
   "wait-failed",
+  "worktree-failed",
 ]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 

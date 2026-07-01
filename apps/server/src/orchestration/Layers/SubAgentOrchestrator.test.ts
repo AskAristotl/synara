@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  type GitCreateWorktreeInput,
   MessageId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   OrchestrationThread,
+  type OrchestrationProjectShell,
   ProjectId,
   type ProviderComposerCapabilities,
   SubAgentSpawnInput,
@@ -18,6 +20,8 @@ import { Effect, Layer, ManagedRuntime, Option, PubSub, Schema, Stream } from "e
 import { describe, expect, it } from "vitest";
 
 import { ServerConfig } from "../../config.ts";
+import { GitCommandError } from "../../git/Errors.ts";
+import { GitCore, type GitCoreShape } from "../../git/Services/GitCore.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderUnsupportedError } from "../../provider/Errors.ts";
 import {
@@ -45,13 +49,19 @@ const decodeWaitInput = Schema.decodeUnknownSync(SubAgentWaitInput);
 const decodeThread = Schema.decodeUnknownSync(OrchestrationThread);
 
 /**
- * A ProjectionSnapshotQuery test double backed by a mutable thread map. Only
- * `getThreadDetailById` is meaningful — `wait` reads each child's envelope/state
- * through it; the rest are inert (mirrors how the discovery/engine doubles stub
- * out unused members).
+ * A ProjectionSnapshotQuery test double backed by a mutable thread map.
+ * `getThreadDetailById` and `getProjectShellById` are the only meaningful
+ * members -- `wait` reads each child's envelope/state through the former,
+ * and the `spawn` worktree path (Task 4.1) resolves the parent project's repo
+ * root through the latter before provisioning a worktree; the rest are inert
+ * (mirrors how the discovery/engine doubles stub out unused members).
+ * `getProjectShellById` resolves to `Option.none()` when no `project` is
+ * given (or the id doesn't match) rather than dying, so a test can exercise
+ * the "parent project not found" failure path.
  */
 function createProjectionStub(
   threads: ReadonlyMap<string, OrchestrationThread>,
+  project?: OrchestrationProjectShell,
 ): ProjectionSnapshotQueryShape {
   const unused = () => Effect.die(new Error("projection snapshot method unused in test"));
   const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
@@ -59,6 +69,8 @@ function createProjectionStub(
       const thread = threads.get(threadId);
       return thread ? Option.some(thread) : Option.none();
     });
+  const getProjectShellById: ProjectionSnapshotQueryShape["getProjectShellById"] = (projectId) =>
+    Effect.sync(() => (project && project.id === projectId ? Option.some(project) : Option.none()));
   return {
     getCommandReadModel: unused,
     getSnapshot: unused,
@@ -66,7 +78,7 @@ function createProjectionStub(
     getSnapshotSequence: unused,
     getShellSnapshot: unused,
     getActiveProjectByWorkspaceRoot: unused,
-    getProjectShellById: unused,
+    getProjectShellById,
     getFirstActiveThreadIdByProjectId: unused,
     getThreadCheckpointContext: unused,
     getFullThreadDiffContext: unused,
@@ -195,6 +207,10 @@ function buildWaitHarness() {
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
     Layer.provide(Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(threads))),
+    // `wait` never touches GitCore -- SubAgentOrchestratorLive now requires it
+    // unconditionally at layer-build time (Task 4.1's worktree provisioning),
+    // so every harness must supply one even where it's never called.
+    Layer.provide(Layer.succeed(GitCore, createGitCoreStub().gitCore)),
   );
   const runtime = ManagedRuntime.make(layer);
   const setThread = (thread: OrchestrationThread): void => {
@@ -280,6 +296,7 @@ function buildMidSeedWaitHarness(midSeedThreadId: ThreadId, midSeedEvent: Orches
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
     Layer.provide(Layer.succeed(ProjectionSnapshotQuery, projection)),
+    Layer.provide(Layer.succeed(GitCore, createGitCoreStub().gitCore)),
   );
   const runtime = ManagedRuntime.make(layer);
   const setThread = (thread: OrchestrationThread): void => {
@@ -355,12 +372,51 @@ function createDiscoveryStub(available: boolean): ProviderDiscoveryServiceShape 
   };
 }
 
-function buildHarness(input: { readonly available: boolean }) {
+/**
+ * A fake GitCore for the `workspace:"worktree"` spawn path (Task 4.1). Only
+ * `createWorktree` is meaningful -- it records every input and, absent a
+ * configured `failure`, returns a canned successful result; the rest are
+ * inert. Mirrors the partial-cast fake `gitCore` in
+ * `automation/Layers/AutomationService.test.ts` (the primary template for
+ * this task's worktree provisioning).
+ */
+function createGitCoreStub(options: { readonly failure?: GitCommandError } = {}): {
+  readonly gitCore: GitCoreShape;
+  readonly calls: GitCreateWorktreeInput[];
+} {
+  const calls: GitCreateWorktreeInput[] = [];
+  const createWorktree = (input: GitCreateWorktreeInput) =>
+    Effect.sync(() => {
+      calls.push(input);
+    }).pipe(
+      Effect.flatMap(() =>
+        options.failure
+          ? Effect.fail(options.failure)
+          : Effect.succeed({
+              worktree: {
+                path: "/tmp/subagent-worktree",
+                branch: input.newBranch ?? input.branch,
+              },
+            }),
+      ),
+    );
+  const gitCore = { createWorktree } as unknown as GitCoreShape;
+  return { gitCore, calls };
+}
+
+function buildHarness(input: {
+  readonly available: boolean;
+  readonly gitCore?: GitCoreShape;
+  readonly project?: OrchestrationProjectShell;
+}) {
   const { engine, commands } = createRecordingEngine();
   const layer = SubAgentOrchestratorLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(input.available))),
-    Layer.provide(Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(new Map()))),
+    Layer.provide(
+      Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(new Map(), input.project)),
+    ),
+    Layer.provide(Layer.succeed(GitCore, input.gitCore ?? createGitCoreStub().gitCore)),
   );
   const runtime = ManagedRuntime.make(layer);
   return { runtime, commands };
@@ -380,6 +436,26 @@ function makeCaller(
     projectId: ProjectId.makeUnsafe(randomUUID()),
     workspace,
     canSpawn: true,
+  };
+}
+
+/**
+ * A minimal `OrchestrationProjectShell` for the `workspace:"worktree"` spawn
+ * path: `spawn` reads only `workspaceRoot` off of it (via
+ * `ProjectionSnapshotQuery.getProjectShellById`) to know where to run `git
+ * worktree add`.
+ */
+function makeProjectShell(projectId: ProjectId, workspaceRoot: string): OrchestrationProjectShell {
+  return {
+    id: projectId,
+    kind: "project",
+    title: "sub-agent parent project",
+    workspaceRoot,
+    defaultModelSelection: null,
+    scripts: [],
+    isPinned: false,
+    createdAt: iso(0),
+    updatedAt: iso(0),
   };
 }
 
@@ -541,6 +617,126 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
         throw new Error("expected the first dispatched command to be thread.create");
       }
       expect(createCommand.runtimeMode).toBe("approval-required");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.spawn (workspace:'worktree', Task 4.1)", () => {
+  it("provisions an isolated worktree branching from the parent repo's HEAD and dispatches thread.create with the returned path/branch", async () => {
+    const { gitCore, calls } = createGitCoreStub();
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime, commands } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const result = await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      // The worktree is created in the parent PROJECT's repo root (not some
+      // other path), branching from its current HEAD -- decision 10.
+      expect(calls).toHaveLength(1);
+      const call = calls[0];
+      expect(call?.cwd).toBe(project.workspaceRoot);
+      expect(call?.branch).toBe("HEAD");
+      expect(call?.newBranch).toBeTruthy();
+      expect(call?.path).toBeNull();
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.envMode).toBe("worktree");
+      expect(createCommand.worktreePath).toBe("/tmp/subagent-worktree");
+      expect(createCommand.branch).toBe(call?.newBranch);
+      expect(result.agentId).toBe(createCommand.threadId);
+
+      const turnCommand = commands[1];
+      if (turnCommand?.type !== "thread.turn.start") {
+        throw new Error("expected the second dispatched command to be thread.turn.start");
+      }
+      expect(turnCommand.threadId).toBe(result.agentId);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("does not provision a worktree for workspace:'share' (unchanged share path)", async () => {
+    const { gitCore, calls } = createGitCoreStub();
+    const { runtime, commands } = buildHarness({ available: true, gitCore });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(calls).toHaveLength(0);
+      expect(commands).toHaveLength(2);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with worktree-failed and dispatches no thread.create when createWorktree fails", async () => {
+    const failure = new GitCommandError({
+      operation: "GitCore.createWorktree",
+      command: "git worktree add",
+      cwd: "/repo/root",
+      detail: "boom",
+    });
+    const { gitCore, calls } = createGitCoreStub({ failure });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime, commands } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("worktree-failed");
+      expect(calls).toHaveLength(1);
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with worktree-failed when the caller's parent project cannot be found", async () => {
+    const { gitCore, calls } = createGitCoreStub();
+    // No `project` given to buildHarness -- getProjectShellById returns None.
+    const { runtime, commands } = buildHarness({ available: true, gitCore });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("worktree-failed");
+      expect(calls).toHaveLength(0);
+      expect(commands).toHaveLength(0);
     } finally {
       await runtime.dispose();
     }
@@ -934,7 +1130,12 @@ describe("SubAgentOrchestratorLive layer wiring (Task 1.3: server composition re
    * uses. If `SubAgentOrchestratorLive`'s dependency set ever drifts from
    * what `OrchestrationLayerLive` exports (the missing-dependency regression
    * this task guards against), this test fails to construct the layer at
-   * runtime instead of silently compiling.
+   * runtime instead of silently compiling. `GitCore` (Task 4.1's worktree
+   * provisioning) is stubbed the same way `ProviderDiscoveryService` is --
+   * `serverLayers.ts` provides the real `GitCoreLive` alongside
+   * `OrchestrationLayerLive` (see `subAgentOrchestratorLayer`), but standing
+   * up the real Git-backed layer is unnecessary for this wiring-only smoke
+   * test.
    */
   it("resolves SubAgentOrchestrator from the real OrchestrationLayerLive plus a discovery stub", async () => {
     const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -948,6 +1149,7 @@ describe("SubAgentOrchestratorLive layer wiring (Task 1.3: server composition re
     const layer = SubAgentOrchestratorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
+      Layer.provide(Layer.succeed(GitCore, createGitCoreStub().gitCore)),
     );
     const runtime = ManagedRuntime.make(layer);
 

@@ -76,12 +76,17 @@ export function makeServerRuntimeServicesLayer() {
     Layer.provideMerge(TerminalLayerLive),
   );
   // Engine + projection come from OrchestrationLayerLive, mirroring the sibling
-  // reactors above. `ProviderDiscoveryService` is intentionally left as an
+  // reactors above. `GitCore` provisions isolated worktrees for
+  // `workspace:"worktree"` spawns (Task 4.1), the same GitCore instance
+  // AutomationService uses for its own worktree provisioning -- no cycle,
+  // since GitCoreLive only depends on ServerConfig/platform services, not on
+  // orchestration. `ProviderDiscoveryService` is intentionally left as an
   // unresolved requirement here -- it is satisfied by `makeServerProviderLayer()`
   // at the composition root (`main.ts`'s `LayerLive`), the same way
   // `providerCommandReactorLayer` above leaves `ProviderService` unresolved.
   const subAgentOrchestratorLayer = SubAgentOrchestratorLive.pipe(
     Layer.provideMerge(OrchestrationLayerLive),
+    Layer.provideMerge(GitCoreLive),
   );
   // The sub-agent MCP handler needs SubAgentOrchestrator (spawn/wait) and
   // ProjectionSnapshotQuery (resolving a caller's projectId/workspace from its

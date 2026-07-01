@@ -1,20 +1,23 @@
 /**
  * SubAgentOrchestratorLive - Layer implementation of {@link SubAgentOrchestrator}.
  *
- * Phase 1 implements the share-cwd `spawn` path only: validate the provider via
- * discovery, resolve a model, mint a child thread, and dispatch `thread.create`
- * + `thread.turn.start` through {@link OrchestrationEngineService}. The command
- * construction mirrors `automation/Layers/AutomationService.ts` (the same
- * server-side "create a thread and start its first turn" flow).
+ * `spawn` validates the provider via discovery, resolves a model, mints a
+ * child thread, and dispatches `thread.create` + `thread.turn.start` through
+ * {@link OrchestrationEngineService}. The command construction mirrors
+ * `automation/Layers/AutomationService.ts` (the same server-side "create a
+ * thread and start its first turn" flow).
  *
- * The child's workspace (`envMode`/`worktreePath`/`branch`) is copied verbatim
- * from `caller.workspace` so `resolveThreadWorkspaceCwd`
- * (`@t3tools/shared/threadEnvironment`) resolves the child to the same cwd as
- * the caller (decision 5, "share parent cwd" —
- * docs/superpowers/specs/2026-06-30-cross-model-agents-design.md §3.3/§5).
- * `workspace:"worktree"` provisioning (a real isolated worktree) is
- * Task 4.1; until then it falls back to the same copy-caller-workspace
- * behavior as `"share"`.
+ * The child's workspace (`envMode`/`worktreePath`/`branch`) depends on
+ * `input.workspace`:
+ * - `"share"` copies `caller.workspace` verbatim so `resolveThreadWorkspaceCwd`
+ *   (`@t3tools/shared/threadEnvironment`) resolves the child to the same cwd as
+ *   the caller (decision 5, "share parent cwd" —
+ *   docs/superpowers/specs/2026-06-30-cross-model-agents-design.md §3.3/§5).
+ * - `"worktree"` (Task 4.1) provisions a REAL isolated Git worktree via
+ *   {@link GitCore}.createWorktree, branching from the parent project's
+ *   current HEAD (decision 10). See {@link resolveWorktreeWorkspace}.
+ *   `includeWip` (snapshotting the parent's dirty tree onto the child branch)
+ *   is Task 4.2 and is not yet implemented.
  *
  * @module SubAgentOrchestratorLive
  */
@@ -35,6 +38,7 @@ import {
   type SubAgentResult,
   type SubAgentSpawnInput,
   type SubAgentStatus,
+  type ThreadEnvironmentMode,
   ThreadId,
 } from "@t3tools/contracts";
 import { Deferred, Duration, Effect, Layer, Option, PubSub } from "effect";
@@ -43,6 +47,7 @@ import { getDefaultModel } from "@t3tools/shared/model";
 import { clampWaitSeconds, SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
+import { GitCore } from "../../git/Services/GitCore.ts";
 import { ProviderDiscoveryService } from "../../provider/Services/ProviderDiscoveryService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -50,6 +55,7 @@ import {
   SubAgentError,
   SubAgentOrchestrator,
   type SubAgentOrchestratorShape,
+  type SubAgentSpawnCaller,
 } from "../Services/SubAgentOrchestrator.ts";
 
 const SUBAGENT_TITLE_MAX_CHARS = 80;
@@ -122,12 +128,34 @@ function deriveSubAgentTitle(input: SubAgentSpawnInput): string {
   return title.length > 0 ? title : "Sub-agent";
 }
 
+/**
+ * A clear, unique branch name for a `workspace:"worktree"` child, e.g.
+ * `subagent/4c796e3a-b64c`. Mirrors `makeAutomationBranchName`'s suffix
+ * derivation in `automation/Layers/AutomationService.ts` (last 12
+ * non-alphanumeric-sanitized, lowercased characters of the id) so worktree
+ * branch names stay consistent across the codebase's programmatic spawners.
+ */
+function makeSubAgentBranchName(childThreadId: ThreadId): string {
+  const suffix = childThreadId
+    .replace(/[^a-z0-9]+/gi, "-")
+    .slice(-12)
+    .toLowerCase();
+  return `subagent/${suffix}`;
+}
+
 const toDispatchError = (cause: OrchestrationDispatchError): SubAgentError =>
   new SubAgentError({
     reason: "dispatch-failed",
     detail: cause.message,
     cause,
   });
+
+/** The child's `envMode`/`branch`/`worktreePath` triple for a `thread.create` dispatch. */
+type SubAgentWorkspaceEnvironment = {
+  readonly envMode: ThreadEnvironmentMode;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+};
 
 /**
  * The terminal classifications `wait` tracks per child. Maps to the public
@@ -238,6 +266,7 @@ export const SubAgentOrchestratorLive = Layer.effect(
     const engine = yield* OrchestrationEngineService;
     const discovery = yield* ProviderDiscoveryService;
     const projection = yield* ProjectionSnapshotQuery;
+    const git = yield* GitCore;
 
     // Read a child's projection detail, mapping an infra read failure to a typed
     // SubAgentError so `wait`'s only error channel stays SubAgentError.
@@ -252,6 +281,64 @@ export const SubAgentOrchestratorLive = Layer.effect(
             }),
         ),
       );
+
+    // Provision a REAL isolated Git worktree for a `workspace:"worktree"`
+    // spawn (Task 4.1): resolve the parent PROJECT's repo root (not the
+    // caller's own, possibly-already-isolated, workspace) via
+    // ProjectionSnapshotQuery, then branch a new worktree off of that repo's
+    // current HEAD (decision 10; `includeWip` snapshotting lands in
+    // Task 4.2). Any failure here — the project can't be resolved, or `git
+    // worktree add` itself fails — surfaces as SubAgentError reason
+    // "worktree-failed" and is thrown BEFORE `spawn` dispatches anything, so
+    // a failed provisioning never leaves a half-created child thread behind.
+    const resolveWorktreeWorkspace = (
+      caller: SubAgentSpawnCaller,
+      childThreadId: ThreadId,
+    ): Effect.Effect<SubAgentWorkspaceEnvironment, SubAgentError> =>
+      Effect.gen(function* () {
+        const projectOption = yield* projection.getProjectShellById(caller.projectId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SubAgentError({
+                reason: "worktree-failed",
+                detail: `Failed to resolve the parent project '${caller.projectId}' for sub-agent worktree provisioning.`,
+                cause,
+              }),
+          ),
+        );
+        if (Option.isNone(projectOption)) {
+          return yield* Effect.fail(
+            new SubAgentError({
+              reason: "worktree-failed",
+              detail: `Sub-agent worktree provisioning failed: parent project '${caller.projectId}' was not found.`,
+            }),
+          );
+        }
+        const project = projectOption.value;
+        const newBranch = makeSubAgentBranchName(childThreadId);
+        const created = yield* git
+          .createWorktree({
+            cwd: project.workspaceRoot,
+            branch: "HEAD",
+            newBranch,
+            path: null,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new SubAgentError({
+                  reason: "worktree-failed",
+                  detail: `Failed to create an isolated Git worktree for the sub-agent: ${cause.message}`,
+                  cause,
+                }),
+            ),
+          );
+        return {
+          envMode: "worktree",
+          branch: created.worktree.branch,
+          worktreePath: created.worktree.path,
+        };
+      });
 
     const spawn: SubAgentOrchestratorShape["spawn"] = (caller, input) =>
       Effect.gen(function* () {
@@ -297,11 +384,22 @@ export const SubAgentOrchestratorLive = Layer.effect(
         const runtimeMode = runtimeModeForApproval(input.approval);
         const title = deriveSubAgentTitle(input);
 
-        // 3. Create the child thread, linked to the caller. Both `"share"`
-        // and (for now, pending Task 4.1) `"worktree"` copy the caller's own
-        // workspace fields verbatim so resolveThreadWorkspaceCwd resolves the
-        // child to the same cwd as the caller (decision 5, "share parent
-        // cwd").
+        // 2b. Resolve the child's workspace. `"share"` copies the caller's
+        // own workspace fields verbatim so resolveThreadWorkspaceCwd resolves
+        // the child to the same cwd as the caller (decision 5, "share parent
+        // cwd"). `"worktree"` (Task 4.1) provisions a real isolated worktree
+        // BEFORE any command is dispatched, so a provisioning failure never
+        // leaves a half-created child thread behind.
+        const workspace: SubAgentWorkspaceEnvironment =
+          input.workspace === "worktree"
+            ? yield* resolveWorktreeWorkspace(caller, childThreadId)
+            : {
+                envMode: caller.workspace.envMode,
+                branch: caller.workspace.branch,
+                worktreePath: caller.workspace.worktreePath,
+              };
+
+        // 3. Create the child thread, linked to the caller.
         yield* engine
           .dispatch({
             type: "thread.create",
@@ -312,9 +410,9 @@ export const SubAgentOrchestratorLive = Layer.effect(
             modelSelection,
             runtimeMode,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            envMode: caller.workspace.envMode,
-            branch: caller.workspace.branch,
-            worktreePath: caller.workspace.worktreePath,
+            envMode: workspace.envMode,
+            branch: workspace.branch,
+            worktreePath: workspace.worktreePath,
             parentThreadId: caller.threadId,
             subagentAgentId: childThreadId,
             subagentRole: input.role ?? null,
