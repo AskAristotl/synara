@@ -23,6 +23,8 @@ export class RevokedHostCredentialError extends Error {
   }
 }
 
+const AUTH_REQUEST_TIMEOUT_MS = 10_000;
+
 export interface HostConnection {
   readonly host: Host;
   requestAuthJson<T>(
@@ -95,7 +97,21 @@ export function makeHostConnection(
           };
 
     const target = host.kind === "local" ? path : `${host.baseUrl}${path}`;
-    const response = await fetch(target, init);
+    // A black-holed network can hang fetch for browser-default minutes; bound it
+    // so the transport's reconnect loop can move on to its next attempt.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(target, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`Request to ${host.label} timed out.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     const payload = (await response.json().catch(() => null)) as unknown;
     if (response.status === 401 && host.kind === "remote") {
       throw new RevokedHostCredentialError(host.id);

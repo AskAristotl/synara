@@ -60,4 +60,25 @@ describe("makeHostConnection (remote)", () => {
       RevokedHostCredentialError,
     );
   });
+
+  it("aborts auth requests that hang past the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(
+        (_input, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError")),
+            );
+          }),
+      );
+      const conn = makeHostConnection(remoteHost, { credentials: creds("BEARER123") });
+      const pending = conn.requestAuthJson("/api/auth/session");
+      const assertion = expect(pending).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
