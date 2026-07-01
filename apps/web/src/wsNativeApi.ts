@@ -303,9 +303,9 @@ export function createWsNativeApi(
 
   transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
     const payload = message.data;
-    // A successful authed connection means the active host's credential is
-    // valid again — clear any stale "needs re-pair" flag for it.
-    useHostStore.getState().markNeedsRepair(useHostStore.getState().activeHostId, false);
+    // A successful authed connection means this connection's host credential
+    // is valid again — clear any stale "needs re-pair" flag for it.
+    useHostStore.getState().markNeedsRepair(connection.host.id, false);
     for (const listener of welcomeListeners) {
       try {
         listener(payload);

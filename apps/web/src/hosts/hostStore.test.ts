@@ -88,4 +88,32 @@ describe("hostStore", () => {
     expect(readded.needsRepair).toBe(false);
     expect(useHostStore.getState().hosts.find((h) => h.id === host.id)?.needsRepair).toBe(false);
   });
+
+  it("markNeedsRepair is a no-op when the value already matches (idempotent)", () => {
+    const host = useHostStore
+      .getState()
+      .addRemoteHost({ label: "Studio", baseUrl: "https://studio.ts.net:3773" });
+
+    // First call actually changes the flag, so state/host references change.
+    useHostStore.getState().markNeedsRepair(host.id, true);
+    const stateAfterFirstCall = useHostStore.getState();
+    const hostAfterFirstCall = stateAfterFirstCall.hosts.find((h) => h.id === host.id);
+    expect(hostAfterFirstCall?.needsRepair).toBe(true);
+
+    // A redundant call with the same value must not touch the store at all.
+    useHostStore.getState().markNeedsRepair(host.id, true);
+    expect(useHostStore.getState()).toBe(stateAfterFirstCall);
+    expect(useHostStore.getState().hosts.find((h) => h.id === host.id)).toBe(hostAfterFirstCall);
+
+    // A brand-new host defaults to needsRepair === undefined; calling with
+    // `false` should be treated as already-equal (Boolean(undefined) === false).
+    const other = useHostStore
+      .getState()
+      .addRemoteHost({ label: "Other", baseUrl: "https://other.ts.net:3773" });
+    const stateBeforeNoopCall = useHostStore.getState();
+    const otherBefore = stateBeforeNoopCall.hosts.find((h) => h.id === other.id);
+    useHostStore.getState().markNeedsRepair(other.id, false);
+    expect(useHostStore.getState()).toBe(stateBeforeNoopCall);
+    expect(useHostStore.getState().hosts.find((h) => h.id === other.id)).toBe(otherBefore);
+  });
 });

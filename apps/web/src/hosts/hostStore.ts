@@ -104,10 +104,13 @@ export const useHostStore = create<HostStoreState>()(
         set((s) => ({
           hosts: s.hosts.map((h) => (h.id === hostId ? { ...h, lastConnectedAt: at } : h)),
         })),
-      markNeedsRepair: (hostId, value) =>
+      markNeedsRepair: (hostId, value) => {
+        const host = get().hosts.find((h) => h.id === hostId);
+        if (host && Boolean(host.needsRepair) === value) return;
         set((s) => ({
           hosts: s.hosts.map((h) => (h.id === hostId ? { ...h, needsRepair: value } : h)),
-        })),
+        }));
+      },
       getActiveHost: () => {
         const s = get();
         return s.hosts.find((h) => h.id === s.activeHostId) ?? localHost();
