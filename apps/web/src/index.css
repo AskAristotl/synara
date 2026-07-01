@@ -2671,3 +2671,24 @@ diffs-container {
   -webkit-background-clip: text;
   animation: ultrathink-rainbow 10s linear infinite;
 }
+
+.chat-markdown .chat-markdown-mermaid {
+  position: relative;
+  margin: 0.5rem 0;
+}
+.chat-markdown .chat-markdown-mermaid__svg svg {
+  max-width: 100%;
+  height: auto;
+}
+.chat-markdown .chat-markdown-mermaid__actions {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+.chat-markdown .chat-markdown-mermaid:hover .chat-markdown-mermaid__actions {
+  opacity: 1;
+}
