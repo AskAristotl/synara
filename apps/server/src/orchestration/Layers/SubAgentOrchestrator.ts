@@ -37,7 +37,7 @@ import {
   type SubAgentStatus,
   ThreadId,
 } from "@t3tools/contracts";
-import { Deferred, Duration, Effect, Layer, Option, Stream } from "effect";
+import { Cause, Deferred, Duration, Effect, Layer, Option, Stream } from "effect";
 
 import { getDefaultModel } from "@t3tools/shared/model";
 import { clampWaitSeconds, SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
@@ -139,10 +139,11 @@ type SubAgentTerminalOutcome = "completed" | "failed" | "interrupted";
 /**
  * Classify a child's session snapshot into a terminal outcome, or `null` when
  * the child is still in flight. `hasRun` gates the `idle`/`ready` → `completed`
- * transition: a freshly-created child sitting at its initial idle (before its
- * turn has actually run) must NOT be mistaken for a finished turn. Only once we
- * have observed the turn run (session went `running`, a `latestTurn` exists, or
- * a turn-diff completed) does a return to idle with no active turn count as a
+ * transition: a freshly-created child sitting at its initial idle/starting
+ * (before its turn has actually run) must NOT be mistaken for a finished turn.
+ * Only once we have observed run-evidence (the session went `running`, or a
+ * non-null `latestTurn`/an assistant message proves it already has — see the
+ * seed loop in `wait`) does a return to idle with no active turn count as a
  * completed turn.
  */
 function classifySession(
@@ -182,30 +183,29 @@ function lastAssistantMessage(messages: readonly OrchestrationMessage[]): string
 }
 
 /**
- * Fold a single domain event into the per-child resolution state. Only the two
- * terminal-bearing event types are consumed: `thread.session-set` (drives
- * failed/interrupted/completed via {@link classifySession}) and
- * `thread.turn-diff-completed` (an unambiguous "turn finished" → completed).
+ * Fold a single domain event into the per-child resolution state. Only
+ * `thread.session-set` carries terminal information — completion is driven
+ * exclusively by the child's session reaching `idle`/`ready` with no active
+ * turn AFTER it has actually run (see {@link classifySession}).
+ *
+ * `thread.turn-diff-completed` is deliberately NOT treated as terminal here.
+ * ProviderRuntimeIngestion (`turn.diff.updated` handling, ~line 2518) dispatches
+ * `thread.turn.diff.complete` with `status: "missing"` repeatedly DURING a
+ * turn — it is a live placeholder checkpoint update, not a turn-finished
+ * signal (CheckpointReactor reacts to the resulting domain event the same way,
+ * ~line 972). Treating its mere arrival as "turn finished" would resolve a
+ * still-running, file-editing child as `"completed"` with a partial
+ * `finalMessage` — the core sub-agent use case this gate exists to protect.
+ *
  * Events for non-target threads are ignored.
  */
 function applyDomainEvent(
   event: OrchestrationEvent,
   targetIds: ReadonlySet<string>,
-  observedRunning: Set<string>,
-  resolveOutcome: (agentId: string, outcome: SubAgentTerminalOutcome) => void,
   applySession: (agentId: string, session: OrchestrationSession | null) => void,
 ): void {
-  if (event.type === "thread.session-set") {
-    if (targetIds.has(event.payload.threadId)) {
-      applySession(event.payload.threadId, event.payload.session);
-    }
-    return;
-  }
-  if (event.type === "thread.turn-diff-completed") {
-    if (targetIds.has(event.payload.threadId)) {
-      observedRunning.add(event.payload.threadId);
-      resolveOutcome(event.payload.threadId, "completed");
-    }
+  if (event.type === "thread.session-set" && targetIds.has(event.payload.threadId)) {
+    applySession(event.payload.threadId, event.payload.session);
   }
 }
 
@@ -387,17 +387,25 @@ export const SubAgentOrchestratorLive = Layer.effect(
             isResolved() ? Deferred.succeed(done, undefined) : Effect.succeed(false),
           );
 
-          // 1. Subscribe to the hot domain-event stream BEFORE snapshotting so a
-          //    terminal event that fires in the seed gap is observed by the
-          //    stream rather than lost.
-          yield* Effect.forkScoped(
-            Stream.runForEach(engine.streamDomainEvents, (event) =>
-              Effect.suspend(() => {
-                applyDomainEvent(event, targetIds, observedRunning, resolveOutcome, applySession);
-                return signalIfResolved;
-              }),
-            ),
-          );
+          // 1. Acquire the domain-event subscription BEFORE snapshotting so a
+          //    terminal event that fires in the seed gap is not lost.
+          //    `Stream.toPull` runs the stream's "acquire" step (in production,
+          //    `PubSub.subscribe` — see `OrchestrationEngine.ts`'s
+          //    `streamDomainEvents` getter) synchronously and hands back a
+          //    repeatable pull effect; the subscription is registered right
+          //    here, before any `yield*` below can suspend this fiber. Nothing
+          //    published from this point on can be missed, because the
+          //    subscription (not our consumption of it) is what determines
+          //    what gets buffered.
+          //
+          //    Consumption is intentionally NOT started yet (step 3, after the
+          //    seed loop) even though it would be safe to do so eagerly: an
+          //    event applied before the seed loop has populated
+          //    `observedRunning` for an already-running child would see
+          //    `hasRun === false` and wrongly fail to resolve it. Draining
+          //    after the seed loop guarantees every buffered event is applied
+          //    against a fully-seeded `observedRunning`/`outcomes` state.
+          const pullDomainEvents = yield* Stream.toPull(engine.streamDomainEvents);
 
           // 2. Seed each child's current state. A child may already be terminal
           //    at seed time — resolve it immediately rather than hang.
@@ -412,9 +420,19 @@ export const SubAgentOrchestratorLive = Layer.effect(
               );
             }
             const thread = threadOption.value;
-            // A non-null latestTurn means a turn has been started for this child,
-            // so a subsequent return to idle counts as a finished turn.
-            if (thread.latestTurn !== null) {
+            // Seed run-evidence, gating the idle/ready -> completed transition
+            // below: a non-null latestTurn is only ever created by a
+            // thread.session-set event with status "running" (see
+            // projector.ts's "thread.session-set" case), so it proves the
+            // session has run at least once; an assistant message is an
+            // independent signal for the same fact (the provider has produced
+            // output). Either is sufficient. A bare seed idle/starting with
+            // NEITHER — a freshly-spawned, not-yet-run child — has no run
+            // evidence and must NOT be mistaken for a finished turn.
+            const hasAssistantMessage = thread.messages.some(
+              (message) => message.role === "assistant",
+            );
+            if (thread.latestTurn !== null || hasAssistantMessage) {
               observedRunning.add(agentId);
             }
             applySession(agentId, thread.session);
@@ -424,11 +442,34 @@ export const SubAgentOrchestratorLive = Layer.effect(
           }
           yield* signalIfResolved;
 
-          // 3. Block until the resolution predicate holds or the timeout elapses.
+          // 3. NOW drain the already-subscribed event stream in the
+          //    background: any events buffered since step 1 (including one
+          //    that raced the seed loop) are applied first, in order, followed
+          //    by any future events. `{ startImmediately: true }` starts this
+          //    fiber synchronously (no scheduler round-trip) since the seed
+          //    loop has already run, so it is always safe here.
+          yield* Effect.forkScoped(
+            Effect.gen(function* () {
+              while (true) {
+                const events = yield* pullDomainEvents;
+                for (const event of events) {
+                  applyDomainEvent(event, targetIds, applySession);
+                  yield* signalIfResolved;
+                }
+              }
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.isDone(cause) ? Effect.void : Effect.failCause(cause),
+              ),
+            ),
+            { startImmediately: true },
+          );
+
+          // 4. Block until the resolution predicate holds or the timeout elapses.
           //    On timeout, still-unresolved children fall through to "running".
           yield* Deferred.await(done).pipe(Effect.timeoutOption(Duration.seconds(timeoutSeconds)));
 
-          // 4. Build one envelope per agentId, in input order, from a fresh read.
+          // 5. Build one envelope per agentId, in input order, from a fresh read.
           const results: SubAgentResult[] = [];
           for (const agentId of agentIds) {
             const threadOption = yield* readChildThread(agentId);

@@ -470,7 +470,9 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
         latestTurnState: "running",
       }),
     );
-    // The engine emits the child's turn completion then a return to idle.
+    // The engine emits a live turn-diff placeholder (a no-op for `wait` — it
+    // fires repeatedly DURING a turn and must NOT resolve the child) followed
+    // by the real completion signal: a return to idle with no active turn.
     pushEvent(turnDiffCompletedEvent(child));
     pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
 
@@ -566,6 +568,38 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     }
   });
 
+  it("does not mark a freshly-spawned, not-yet-run child as completed at bare seed idle", async () => {
+    const { runtime, setThread } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // A fresh spawn before the engine has picked up its queued turn: no
+    // latestTurn, no assistant output, session sitting at a bare idle/starting
+    // with activeTurnId null — i.e. NO run evidence at all. This must NOT be
+    // mistaken for a finished turn (it would be if any seed idle counted as
+    // completed); it stays "running" until it actually runs or times out.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [{ role: "user", text: "delegated task" }],
+        session: makeSession(child, { status: "idle", activeTurnId: null }),
+        latestTurnState: null,
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // timeoutSeconds clamps to 1s (PositiveInt floor) — proves it returns
+      // "running" rather than hanging or wrongly resolving "completed".
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+      );
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.status).toBe("running");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("resolves a child that is already terminal at seed time without hanging", async () => {
     const { runtime, setThread } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
@@ -625,8 +659,11 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
         latestTurnState: "running",
       }),
     );
-    // Only the first child finishes.
-    pushEvent(turnDiffCompletedEvent(finished));
+    // Only the first child finishes: a real run -> finish transition (it was
+    // seeded "running"; the session now returns to idle with no active turn).
+    pushEvent(
+      sessionSetEvent(finished, makeSession(finished, { status: "idle", activeTurnId: null })),
+    );
 
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
@@ -649,16 +686,20 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
 
   it("preserves agentIds order and detects idle-after-run completion", async () => {
     const { runtime, setThread, pushEvent } = buildWaitHarness();
-    const viaTurnDiff = ThreadId.makeUnsafe(randomUUID());
-    const viaIdle = ThreadId.makeUnsafe(randomUUID());
+    // Both children resolve via the SAME real run -> finish transition
+    // (seeded "running", then a session-set event returns them to idle with no
+    // active turn) — only the RESOLUTION order differs from the RESULT order,
+    // to prove results follow `input.agentIds`, not which child resolves first.
+    const childA = ThreadId.makeUnsafe(randomUUID());
+    const childB = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
-        id: viaTurnDiff,
+        id: childA,
         messages: [
           { role: "user", text: "a" },
           { role: "assistant", text: "A-final" },
         ],
-        session: makeSession(viaTurnDiff, {
+        session: makeSession(childA, {
           status: "running",
           activeTurnId: TurnId.makeUnsafe(randomUUID()),
         }),
@@ -667,34 +708,35 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     );
     setThread(
       makeThread({
-        id: viaIdle,
+        id: childB,
         messages: [
           { role: "user", text: "b" },
           { role: "assistant", text: "B-final" },
         ],
-        session: makeSession(viaIdle, {
+        session: makeSession(childB, {
           status: "running",
           activeTurnId: TurnId.makeUnsafe(randomUUID()),
         }),
         latestTurnState: "running",
       }),
     );
-    pushEvent(turnDiffCompletedEvent(viaTurnDiff));
-    // Running -> idle with no active turn is a finished turn (idle-after-run).
-    pushEvent(
-      sessionSetEvent(viaIdle, makeSession(viaIdle, { status: "idle", activeTurnId: null })),
-    );
+    // childA's idle event is pushed (and resolves) first; childB's is queued
+    // behind it and resolves second. Running -> idle with no active turn is a
+    // finished turn (idle-after-run).
+    pushEvent(sessionSetEvent(childA, makeSession(childA, { status: "idle", activeTurnId: null })));
+    pushEvent(sessionSetEvent(childB, makeSession(childB, { status: "idle", activeTurnId: null })));
 
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
-      // Pass the ids in reverse to prove order follows the input, not resolution.
+      // Pass the ids in reverse of resolution order to prove the RESULT order
+      // follows the input, not resolution order.
       const results = await runtime.runPromise(
         orchestrator.wait(
-          decodeWaitInput({ agentIds: [viaIdle, viaTurnDiff], mode: "all", timeoutSeconds: 30 }),
+          decodeWaitInput({ agentIds: [childB, childA], mode: "all", timeoutSeconds: 30 }),
         ),
       );
 
-      expect(results.map((entry) => entry.agentId)).toEqual([viaIdle, viaTurnDiff]);
+      expect(results.map((entry) => entry.agentId)).toEqual([childB, childA]);
       expect(results[0]?.status).toBe("completed");
       expect(results[0]?.finalMessage).toBe("B-final");
       expect(results[1]?.status).toBe("completed");
