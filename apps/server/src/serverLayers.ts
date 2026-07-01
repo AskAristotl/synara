@@ -14,6 +14,8 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus"
 import { SubAgentOrchestratorLive } from "./orchestration/Layers/SubAgentOrchestrator";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer";
+import { SessionTokenRegistryLive } from "./subagentMcp/SessionTokenRegistry";
+import { SubAgentMcpServerLive } from "./subagentMcp/SubAgentMcpServer";
 
 import { DevServerManagerLive } from "./devServerManager";
 import { KeybindingsLive } from "./keybindings";
@@ -81,6 +83,14 @@ export function makeServerRuntimeServicesLayer() {
   const subAgentOrchestratorLayer = SubAgentOrchestratorLive.pipe(
     Layer.provideMerge(OrchestrationLayerLive),
   );
+  // The sub-agent MCP handler needs SubAgentOrchestrator (spawn/wait) and
+  // ProjectionSnapshotQuery (resolving a caller's projectId/workspace from its
+  // own thread row, decision #3 in the Task 2.2 brief) -- both already exposed
+  // by subAgentOrchestratorLayer above, so provide it from there rather than
+  // re-deriving OrchestrationLayerLive a second time.
+  const subAgentMcpServerLayer = SubAgentMcpServerLive.pipe(
+    Layer.provideMerge(subAgentOrchestratorLayer),
+  );
   // Shares the single memoized TerminalManager with the top-level TerminalLayerLive.
   const devServerManagerLayer = DevServerManagerLive.pipe(Layer.provide(TerminalLayerLive));
   const sessionCredentialLayer = SessionCredentialServiceLive.pipe(
@@ -127,6 +137,8 @@ export function makeServerRuntimeServicesLayer() {
     orchestrationReactorLayer,
     threadDeletionReactorLayer,
     subAgentOrchestratorLayer,
+    subAgentMcpServerLayer,
+    SessionTokenRegistryLive,
     devServerManagerLayer,
     GitLayerLive,
     TextGenerationLayerLive,

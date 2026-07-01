@@ -31,6 +31,7 @@ import type { ProjectFaviconResolverShape } from "./project/Services/ProjectFavi
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver";
 import type { ServerReadiness } from "./server/readiness";
 import { resolveFavicon, tryParseHost } from "./siteFaviconCache";
+import { subAgentMcpRouteLayer } from "./subagentMcp/httpTransport.ts";
 import { isTrustedAppOrigin, normalizeCorsOrigin } from "./trustedOrigins";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
@@ -170,6 +171,7 @@ export function makeEffectHttpRouteLayer(readiness: ServerReadiness) {
     editorIconEffectRouteLayer,
     localImageEffectRouteLayer,
     attachmentsEffectRouteLayer,
+    subAgentMcpRouteLayer,
     staticAndDevEffectRouteLayer,
   );
 }
