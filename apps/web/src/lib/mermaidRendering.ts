@@ -92,10 +92,13 @@ export function getMermaidSvgPromise(code: string, theme: MermaidTheme): Promise
       cacheMermaidSvg(cacheKey, svg, code);
       return svg;
     })
-    .catch((error: unknown) => {
-      // Drop the failed promise so a later retry (e.g. after an edit) can re-render.
+    .finally(() => {
+      // Drop the settled promise so it is not pinned here forever. The LRU
+      // (mermaidSvgCache) is the durable memo — keeping every resolved promise
+      // in this Map would hold its SVG strongly and defeat the LRU's memory cap.
+      // Cache-first lookups serve re-renders; an LRU eviction correctly triggers
+      // a fresh render, and a failed render is likewise freed for retry.
       svgPromiseCache.delete(cacheKey);
-      throw error;
     });
   svgPromiseCache.set(cacheKey, promise);
   return promise;
