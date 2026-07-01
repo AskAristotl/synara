@@ -116,6 +116,20 @@ export function shouldKeepServerLifecycleStream(activeChannels: ReadonlySet<stri
 }
 
 const CONNECT_PROBE_TIMEOUT_MS = 10_000;
+const CONNECT_WAIT_TIMEOUT_MS = 8_000;
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 15_000;
+const RECONNECT_UNREACHABLE_AFTER_FAILURES = 2;
+
+// Exponential backoff with jitter in [cap/2, cap): concurrent clients spread
+// their redials instead of stampeding a just-restarted host.
+export function computeReconnectDelayMs(
+  failures: number,
+  random: () => number = Math.random,
+): number {
+  const cap = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** failures, RECONNECT_MAX_DELAY_MS);
+  return Math.round(cap / 2 + random() * (cap / 2));
+}
 
 export class WsTransport {
   private readonly resolveUrl: () => Promise<string>;
@@ -135,6 +149,8 @@ export class WsTransport {
   private clientPromise: Promise<RpcClientInstance>;
   private reconnectPromise: Promise<RpcClientInstance> | null = null;
   private reconnectFailures = 0;
+  private reconnectWake: (() => void) | null = null;
+  private readonly proactiveTriggerCleanups: Array<() => void> = [];
   private readonly streamCleanups = new Map<string, () => void>();
   private readonly stoppingStreams = new Set<string>();
   private shellSubscribed = false;
@@ -149,6 +165,23 @@ export class WsTransport {
           : () => Promise.resolve(makeSocketUrl(null));
     const session = this.createSession();
     this.clientPromise = session.clientPromise;
+    // The initial connection enters the same persistent retry loop as any drop.
+    void session.clientPromise.catch(() => {
+      if (!this.disposed) void this.reconnect().catch(() => undefined);
+    });
+  }
+
+  /** Attempt to reconnect right now: skip any backoff sleep in progress. */
+  requestReconnectNow(): void {
+    if (this.disposed) return;
+    if (this.reconnectWake) {
+      this.reconnectWake();
+      return;
+    }
+    if (this.reconnectPromise) return;
+    if (this.state !== "open") {
+      void this.reconnect().catch(() => undefined);
+    }
   }
 
   private requireRuntime(): ManagedRuntime.ManagedRuntime<RpcClient.Protocol, never> {
@@ -261,6 +294,9 @@ export class WsTransport {
   dispose() {
     this.disposed = true;
     this.setState("disposed");
+    this.reconnectWake?.();
+    for (const cleanup of this.proactiveTriggerCleanups) cleanup();
+    this.proactiveTriggerCleanups.length = 0;
     for (const cleanup of this.streamCleanups.values()) cleanup();
     this.streamCleanups.clear();
     // Dispose can race with initial connection or reconnect promises. Mark them
@@ -345,17 +381,41 @@ export class WsTransport {
       return await this.clientPromise;
     } catch {
       if (this.disposed) throw new Error("Transport disposed");
-      return this.reconnect();
+      return await this.waitForReconnect();
     }
+  }
+
+  // Bound how long a caller waits for a live connection: user actions should
+  // fail fast with a clear error while the reconnect loop keeps running.
+  private waitForReconnect(): Promise<RpcClientInstance> {
+    const reconnecting = this.reconnect();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Host connection is offline; reconnecting in the background.")),
+        CONNECT_WAIT_TIMEOUT_MS,
+      );
+      reconnecting.then(
+        (client) => {
+          clearTimeout(timer);
+          resolve(client);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
   }
 
   private reconnect(): Promise<RpcClientInstance> {
     if (this.reconnectPromise) return this.reconnectPromise;
 
     const oldReady = this.sessionReady;
+    // The loop restarts every registered stream after it connects, so their
+    // interrupts here are intentional stops, not failures to react to.
+    for (const key of this.streamCleanups.keys()) this.stoppingStreams.add(key);
     for (const cleanup of this.streamCleanups.values()) cleanup();
     this.streamCleanups.clear();
-    this.stoppingStreams.clear();
 
     this.setState("connecting");
 
@@ -365,7 +425,7 @@ export class WsTransport {
       )
       .catch(() => undefined);
 
-    this.reconnectPromise = this.openReconnectSession().finally(() => {
+    this.reconnectPromise = this.runReconnectLoop().finally(() => {
       this.reconnectPromise = null;
     });
     return this.reconnectPromise;
@@ -383,26 +443,60 @@ export class WsTransport {
     }
   }
 
-  private async openReconnectSession(): Promise<RpcClientInstance> {
-    const delayMs = Math.min(500 * 2 ** this.reconnectFailures, 5_000);
-    this.reconnectFailures += 1;
-    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  private async runReconnectLoop(): Promise<RpcClientInstance> {
+    for (;;) {
+      await this.sleepUntilNextAttempt(computeReconnectDelayMs(this.reconnectFailures));
+      if (this.disposed) throw new Error("Transport disposed");
 
-    const session = this.createSession();
-    this.clientPromise = session.clientPromise;
+      const session = this.createSession();
+      this.clientPromise = session.clientPromise;
+      try {
+        const client = await session.clientPromise;
+        if (this.disposed) throw new Error("Transport disposed");
+        this.reconnectFailures = 0;
+        for (const channel of this.listeners.keys()) {
+          this.startChannelStream(channel as WsPushChannel);
+        }
+        if (this.shellSubscribed) {
+          this.startShellStream(client);
+        }
+        for (const [threadId, input] of this.threadSubscriptions) {
+          this.startThreadStream(client, threadId, input);
+        }
+        return client;
+      } catch (error) {
+        if (this.disposed) throw error;
+        this.reconnectFailures += 1;
+        // Keep retrying, but surface "unreachable" once it stops looking like a blip.
+        if (this.reconnectFailures >= RECONNECT_UNREACHABLE_AFTER_FAILURES) {
+          this.setState("closed");
+        }
+        // Dispose this attempt's runtime/socket before dialing again.
+        const failedReady = this.sessionReady;
+        void failedReady
+          ?.then(({ runtime, clientScope }) =>
+            runtime
+              .runPromise(Scope.close(clientScope, Exit.void))
+              .finally(() => runtime.dispose()),
+          )
+          .catch(() => undefined);
+      }
+    }
+  }
 
-    const client = await session.clientPromise;
-    this.reconnectFailures = 0;
-    for (const channel of this.listeners.keys()) {
-      this.startChannelStream(channel as WsPushChannel);
-    }
-    if (this.shellSubscribed) {
-      this.startShellStream(client);
-    }
-    for (const [threadId, input] of this.threadSubscriptions) {
-      this.startThreadStream(client, threadId, input);
-    }
-    return client;
+  private sleepUntilNextAttempt(ms: number): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.reconnectWake = null;
+        resolve();
+      }, ms);
+      this.reconnectWake = () => {
+        clearTimeout(timer);
+        this.reconnectWake = null;
+        resolve();
+      };
+    });
   }
 
   private emit<C extends WsPushChannel>(channel: C, data: WsPushMessage<C>["data"]): void {
@@ -498,9 +592,12 @@ export class WsTransport {
         }
       })
       .catch((error) => {
-        if (!this.disposed && this.listeners.has(channel)) {
-          console.warn("WebSocket RPC channel failed to start", error);
-          window.setTimeout(() => this.startChannelStream(channel), 500);
+        if (this.disposed || !this.listeners.has(channel)) return;
+        console.warn("WebSocket RPC channel failed to start", error);
+        // While disconnected the reconnect loop owns recovery (it restarts every
+        // subscribed channel on success); only self-retry when the transport is open.
+        if (this.state === "open") {
+          setTimeout(() => this.startChannelStream(channel), 500);
         }
       });
   }

@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WS_CHANNELS } from "@t3tools/contracts";
 
-import { shouldKeepServerLifecycleStream, WsTransport } from "./wsTransport";
+import { computeReconnectDelayMs, shouldKeepServerLifecycleStream, WsTransport } from "./wsTransport";
 
 type WsEventType = "open" | "message" | "close" | "error";
 type WsListener = (event?: { data?: unknown }) => void;
@@ -150,6 +150,51 @@ describe("WsTransport", () => {
     transport.dispose();
 
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("computes bounded jittered reconnect delays", () => {
+    expect(computeReconnectDelayMs(0, () => 0)).toBe(250);
+    expect(computeReconnectDelayMs(0, () => 0.999)).toBeLessThanOrEqual(500);
+    expect(computeReconnectDelayMs(10, () => 0)).toBe(7_500);
+    expect(computeReconnectDelayMs(10, () => 0.999)).toBeLessThanOrEqual(15_000);
+  });
+
+  it("keeps retrying failed connections until disposed", async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      const resolveUrl = async () => {
+        attempts += 1;
+        throw new Error("network down");
+      };
+      const transport = new WsTransport(resolveUrl);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(attempts).toBeGreaterThanOrEqual(3);
+      expect(transport.getState()).toBe("closed");
+      transport.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries immediately when requestReconnectNow fires during backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      const resolveUrl = async () => {
+        attempts += 1;
+        throw new Error("network down");
+      };
+      const transport = new WsTransport(resolveUrl);
+      await vi.advanceTimersByTimeAsync(500);
+      const before = attempts;
+      transport.requestReconnectNow();
+      await vi.advanceTimersByTimeAsync(5);
+      expect(attempts).toBeGreaterThan(before);
+      transport.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("calls the async URL resolver for each session", async () => {
