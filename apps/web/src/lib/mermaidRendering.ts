@@ -64,6 +64,34 @@ export function resetMermaidModuleForTests(): void {
   mermaidModulePromise = null;
 }
 
+// Total attempts for the render phase (1 initial + retries). `parse` is NOT
+// retried — it throws deterministically on invalid syntax, so retrying would
+// only delay the source fallback. Only `render` (which can fail transiently
+// under concurrent first-use) is retried.
+const MERMAID_RENDER_ATTEMPTS = 3;
+
+// Serializes every parse+render as one atomic unit. Mermaid's own `render` is
+// internally serialized (via its executionQueue), but `parse` is not — and
+// `parse` runs a *global* reset()+addDirective() from our per-diagram
+// `%%{init}%%` theme. When several diagrams settle at once (e.g. Suspense
+// boundaries resolving together once streaming ends), those unsynchronized
+// global-config mutations interleave and a render can pick up the wrong config
+// and throw. Chaining each diagram's parse→render through this tail promise
+// guarantees no two overlap. Render was never parallel anyway, so the added
+// serialization of the (fast) parse phase costs effectively nothing.
+let mermaidWorkChain: Promise<unknown> = Promise.resolve();
+
+function serializeMermaidWork<T>(work: () => Promise<T>): Promise<T> {
+  const run = mermaidWorkChain.then(work, work);
+  // Keep the chain alive whether this unit resolves or rejects, without
+  // pinning results: swallow the outcome so the next unit always proceeds.
+  mermaidWorkChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 async function renderMermaidToSvg(
   mermaid: MermaidModule,
   code: string,
@@ -72,11 +100,26 @@ async function renderMermaidToSvg(
   // Theme per-diagram via an init directive so concurrent light/dark renders never
   // race on mermaid's global config. Cache key already includes the theme.
   const themed = `%%{init: {"theme":"${theme}"}}%%\n${code}`;
-  // Throws on invalid syntax; the caller lets the rejection reach the error boundary.
-  await mermaid.parse(themed);
-  renderCounter += 1;
-  const { svg } = await mermaid.render(`synara-mermaid-${renderCounter}`, themed);
-  return svg;
+  return serializeMermaidWork(async () => {
+    // Throws on invalid syntax; the caller lets the rejection reach the error
+    // boundary. Not retried — a syntax error is deterministic.
+    await mermaid.parse(themed);
+    // Retry the render phase: a transient failure (e.g. concurrent cold-start
+    // config race) otherwise sticks the block on its source fallback until the
+    // component remounts. A clean parse means the diagram is valid, so a render
+    // failure is worth re-attempting before giving up.
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MERMAID_RENDER_ATTEMPTS; attempt += 1) {
+      renderCounter += 1;
+      try {
+        const { svg } = await mermaid.render(`synara-mermaid-${renderCounter}`, themed);
+        return svg;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  });
 }
 
 export function getMermaidSvgPromise(code: string, theme: MermaidTheme): Promise<string> {
