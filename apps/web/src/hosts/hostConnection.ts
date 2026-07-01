@@ -3,7 +3,8 @@
 // Purpose: Host-aware auth fetch + socket-URL resolution. Local hosts keep the
 //          existing same-origin/loopback path; remote hosts use per-host bearer.
 // Layer: Web transport
-// Exports: HostConnection, makeHostConnection, MissingHostCredentialError
+// Exports: HostConnection, makeHostConnection, MissingHostCredentialError,
+//          RevokedHostCredentialError
 
 import type { Host } from "./hostStore";
 import { getHostCredentialStore, type HostCredentialStore } from "./hostCredentialStore";
@@ -12,6 +13,13 @@ export class MissingHostCredentialError extends Error {
   constructor(hostId: string) {
     super(`No stored credential for host ${hostId}; re-pair required.`);
     this.name = "MissingHostCredentialError";
+  }
+}
+
+export class RevokedHostCredentialError extends Error {
+  constructor(public readonly hostId: string) {
+    super("This device's access was revoked — re-pair required.");
+    this.name = "RevokedHostCredentialError";
   }
 }
 
@@ -89,6 +97,9 @@ export function makeHostConnection(
     const target = host.kind === "local" ? path : `${host.baseUrl}${path}`;
     const response = await fetch(target, init);
     const payload = (await response.json().catch(() => null)) as unknown;
+    if (response.status === 401 && host.kind === "remote") {
+      throw new RevokedHostCredentialError(host.id);
+    }
     if (!response.ok) {
       const message =
         payload &&

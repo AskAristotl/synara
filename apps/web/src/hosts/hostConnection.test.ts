@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Host } from "./hostStore";
-import { makeHostConnection } from "./hostConnection";
+import { makeHostConnection, RevokedHostCredentialError } from "./hostConnection";
 import type { HostCredentialStore } from "./hostCredentialStore";
 
 const remoteHost: Host = {
@@ -48,5 +48,16 @@ describe("makeHostConnection (remote)", () => {
   it("throws a typed error when no credential is stored", async () => {
     const conn = makeHostConnection(remoteHost, { credentials: creds(null) });
     await expect(conn.requestAuthJson("/api/auth/session")).rejects.toThrow(/credential/i);
+  });
+
+  it("throws RevokedHostCredentialError on 401", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 }),
+    );
+    const conn = makeHostConnection(remoteHost, { credentials: creds("BEARER123") });
+    await expect(conn.requestAuthJson("/api/auth/session")).rejects.toThrow(/re-?pair/i);
+    await expect(conn.requestAuthJson("/api/auth/session")).rejects.toBeInstanceOf(
+      RevokedHostCredentialError,
+    );
   });
 });

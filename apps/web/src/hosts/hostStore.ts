@@ -16,6 +16,7 @@ export interface Host {
   readonly baseUrl: string | null;
   readonly createdAt: number;
   lastConnectedAt: number | null;
+  needsRepair?: boolean;
 }
 
 export const LOCAL_HOST_ID = "local";
@@ -46,6 +47,7 @@ export interface HostStoreState {
   renameHost: (hostId: string, label: string) => void;
   setActiveHostId: (hostId: string) => void;
   markConnected: (hostId: string, at: number) => void;
+  markNeedsRepair: (hostId: string, value: boolean) => void;
   getActiveHost: () => Host;
 }
 
@@ -97,6 +99,10 @@ export const useHostStore = create<HostStoreState>()(
       markConnected: (hostId, at) =>
         set((s) => ({
           hosts: s.hosts.map((h) => (h.id === hostId ? { ...h, lastConnectedAt: at } : h)),
+        })),
+      markNeedsRepair: (hostId, value) =>
+        set((s) => ({
+          hosts: s.hosts.map((h) => (h.id === hostId ? { ...h, needsRepair: value } : h)),
         })),
       getActiveHost: () => {
         const s = get();
