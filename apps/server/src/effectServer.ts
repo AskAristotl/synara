@@ -103,6 +103,13 @@ export const createEffectServer = Effect.fn(function* () {
     : { port: config.port };
   const httpServer = yield* NodeHttpServer.make(() => {
     nodeServer = http.createServer();
+    // Remote clients can vanish without closing TCP (killed mobile browsers,
+    // dropped networks). TCP keepalive lets the OS detect dead peers so their
+    // websocket subscriptions and buffers are released instead of lingering
+    // until the default multi-hour reap.
+    nodeServer.on("connection", (socket) => {
+      socket.setKeepAlive(true, 30_000);
+    });
     return nodeServer;
   }, listenOptions).pipe(
     Effect.mapError((cause) => new ServerLifecycleError({ operation: "httpServerListen", cause })),
