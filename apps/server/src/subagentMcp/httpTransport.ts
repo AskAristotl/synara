@@ -22,9 +22,16 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 
 import { jsonRpcParseError, SubAgentMcpServer } from "./SubAgentMcpServer.ts";
 import { SessionTokenRegistry } from "./SessionTokenRegistry.ts";
+import { SUBAGENT_MCP_ROUTE_PATH } from "./constants.ts";
 
-/** Route path every provider session's MCP client is configured to POST to. */
-export const SUBAGENT_MCP_ROUTE_PATH = "/internal/subagent-mcp";
+/**
+ * Route path every provider session's MCP client is configured to POST to.
+ * Re-exported here (moved to `./constants.ts`) so existing importers keep
+ * working without a change; new leaf-layer importers (e.g. `ProviderService`)
+ * should import directly from `./constants.ts` to avoid this module's wider
+ * import surface.
+ */
+export { SUBAGENT_MCP_ROUTE_PATH };
 
 const AUTHORIZATION_PREFIX = "Bearer ";
 

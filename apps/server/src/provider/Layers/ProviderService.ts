@@ -41,7 +41,7 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 import { ServerConfig } from "../../config.ts";
 import { SessionTokenRegistry } from "../../subagentMcp/SessionTokenRegistry.ts";
-import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/httpTransport.ts";
+import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/constants.ts";
 
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogPath?: string;
@@ -109,14 +109,24 @@ function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "st
   }
 }
 
+interface RuntimePayloadExtra {
+  readonly modelSelection?: unknown;
+  readonly providerOptions?: unknown;
+  /**
+   * Root-vs-sub-agent capability for the thread. Persisted so
+   * `recoverSessionForThread` can reissue a `subagentMcp` token with the
+   * correct capability after an idle-stop/restart recovery, where the
+   * original caller-supplied `ProviderSessionStartInput.canSpawn` is no
+   * longer available.
+   */
+  readonly canSpawn?: boolean;
+  readonly lastRuntimeEvent?: string;
+  readonly lastRuntimeEventAt?: string;
+}
+
 function toRuntimePayloadFromSession(
   session: ProviderSession,
-  extra?: {
-    readonly modelSelection?: unknown;
-    readonly providerOptions?: unknown;
-    readonly lastRuntimeEvent?: string;
-    readonly lastRuntimeEventAt?: string;
-  },
+  extra?: RuntimePayloadExtra,
 ): Record<string, unknown> {
   return {
     cwd: session.cwd ?? null,
@@ -125,6 +135,7 @@ function toRuntimePayloadFromSession(
     lastError: session.lastError ?? null,
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.providerOptions !== undefined ? { providerOptions: extra.providerOptions } : {}),
+    ...(extra?.canSpawn !== undefined ? { canSpawn: extra.canSpawn } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
@@ -162,6 +173,19 @@ function readPersistedCwd(
   if (typeof rawCwd !== "string") return undefined;
   const trimmed = rawCwd.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Reads back the `canSpawn` capability persisted by `startSession` (see
+ * `RuntimePayloadExtra.canSpawn`). Defaults to `false` (the safe default —
+ * only explicitly-root sessions may spawn children) when absent, matching
+ * `input.canSpawn ?? false` at the original `startSession` call site.
+ */
+function readPersistedCanSpawn(runtimePayload: ProviderRuntimeBinding["runtimePayload"]): boolean {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return false;
+  }
+  return "canSpawn" in runtimePayload && runtimePayload.canSpawn === true;
 }
 
 function runtimePayloadRecord(value: unknown): Record<string, unknown> {
@@ -247,6 +271,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const analytics = yield* Effect.service(AnalyticsService);
     const sessionTokens = yield* SessionTokenRegistry;
     const serverConfig = yield* ServerConfig;
+    // Mints a fresh sub-agent MCP bearer token/URL for `threadId`, revoking
+    // any tokens already issued for it first. Used both by `startSession`
+    // (the public entry point) and `recoverSessionForThread` (implicit
+    // idle-stop/restart recovery), so a recovered session's re-spawned
+    // provider process always gets a live, correctly-scoped token instead of
+    // silently losing its sub-agent MCP tools.
+    const mintSubagentMcpConfig = (threadId: ThreadId, canSpawn: boolean) =>
+      Effect.gen(function* () {
+        yield* sessionTokens.revoke(threadId);
+        const token = yield* sessionTokens.issueToken(threadId, { canSpawn });
+        return {
+          url: `http://127.0.0.1:${serverConfig.port}${SUBAGENT_MCP_ROUTE_PATH}`,
+          token,
+        };
+      });
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -378,12 +417,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const upsertSessionBinding = (
       session: ProviderSession,
       threadId: ThreadId,
-      extra?: {
-        readonly modelSelection?: unknown;
-        readonly providerOptions?: unknown;
-        readonly lastRuntimeEvent?: string;
-        readonly lastRuntimeEventAt?: string;
-      },
+      extra?: RuntimePayloadExtra,
     ) =>
       directory.upsert({
         threadId,
@@ -566,6 +600,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       Effect.gen(function* () {
         const adapter = yield* registry.getByProvider(input.binding.provider);
         const hasPersistedResumeCursor = hasResumeCursor(input.binding.resumeCursor);
+        // canSpawn (root vs. sub-agent thread) isn't part of `ProviderRuntimeBinding`
+        // — it's only ever available here via the persisted runtimePayload, since
+        // recovery has no caller-supplied `ProviderSessionStartInput` to read it
+        // from. Re-persisted below (not just read) so it survives further
+        // recovery cycles unambiguously rather than relying on payload merge.
+        const persistedCanSpawn = readPersistedCanSpawn(input.binding.runtimePayload);
         const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);
         if (hasActiveSession) {
           const activeSessions = yield* adapter.listSessions();
@@ -573,7 +613,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             (session) => session.threadId === input.binding.threadId,
           );
           if (existing) {
-            yield* upsertSessionBinding(existing, input.binding.threadId);
+            yield* upsertSessionBinding(existing, input.binding.threadId, {
+              canSpawn: persistedCanSpawn,
+            });
             yield* analytics.record("provider.session.recovered", {
               provider: existing.provider,
               strategy: "adopt-existing",
@@ -593,6 +635,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
         const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
         const persistedProviderOptions = readPersistedProviderOptions(input.binding.runtimePayload);
+        // Recovery re-spawns the adapter's provider process from scratch, so it
+        // needs its own fresh sub-agent MCP token/URL exactly like a fresh
+        // `startSession` call — otherwise a recovered sub-agent-capable session
+        // silently loses its `spawn_agent`/`wait`/`send_message`/`stop_agent`
+        // tools until the caller explicitly restarts it via `startSession`.
+        const subagentMcp = yield* mintSubagentMcpConfig(input.binding.threadId, persistedCanSpawn);
 
         const resumed = yield* adapter.startSession({
           threadId: input.binding.threadId,
@@ -602,6 +650,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...(persistedProviderOptions ? { providerOptions: persistedProviderOptions } : {}),
           ...(hasPersistedResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
+          subagentMcp,
         });
         if (resumed.provider !== adapter.provider) {
           return yield* toValidationError(
@@ -610,7 +659,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           );
         }
 
-        yield* upsertSessionBinding(resumed, input.binding.threadId);
+        yield* upsertSessionBinding(resumed, input.binding.threadId, {
+          canSpawn: persistedCanSpawn,
+        });
         yield* analytics.record("provider.session.recovered", {
           provider: resumed.provider,
           strategy: "resume-thread",
@@ -699,13 +750,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         // endpoint; canSpawn (root vs. sub-agent thread) is decided by the caller
         // (orchestration side) and defaults to false when absent so only
         // explicitly-root sessions can spawn children.
-        const subagentMcpToken = yield* sessionTokens.issueToken(threadId, {
-          canSpawn: input.canSpawn ?? false,
-        });
-        const subagentMcp = {
-          url: `http://127.0.0.1:${serverConfig.port}${SUBAGENT_MCP_ROUTE_PATH}`,
-          token: subagentMcpToken,
-        };
+        const effectiveCanSpawn = input.canSpawn ?? false;
+        const subagentMcp = yield* mintSubagentMcpConfig(threadId, effectiveCanSpawn);
         const session = yield* adapter.startSession({
           ...input,
           ...(effectiveProviderOptions !== undefined
@@ -725,6 +771,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         yield* upsertSessionBinding(session, threadId, {
           modelSelection: input.modelSelection,
           providerOptions: effectiveProviderOptions,
+          canSpawn: effectiveCanSpawn,
         });
         yield* analytics.record("provider.session.started", {
           provider: session.provider,

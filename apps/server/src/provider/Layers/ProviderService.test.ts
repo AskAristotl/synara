@@ -48,7 +48,7 @@ import {
   SessionTokenRegistry,
   SessionTokenRegistryLive,
 } from "../../subagentMcp/SessionTokenRegistry.ts";
-import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/httpTransport.ts";
+import { SUBAGENT_MCP_ROUTE_PATH } from "../../subagentMcp/constants.ts";
 
 // `ProviderServiceLive` depends on `SessionTokenRegistry` + `ServerConfig` to
 // mint the sub-agent MCP bearer token/URL every `startSession` attaches
@@ -782,6 +782,111 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const identityAfterStop = yield* sessionTokens.resolve(token!);
       assert.equal(Option.isSome(identityAfterStop), false);
     }),
+  );
+
+  it.effect(
+    "persists canSpawn and reissues a canSpawn:true sub-agent MCP token when recovering a stale root-thread session",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const sessionTokens = yield* SessionTokenRegistry;
+        const threadId = asThreadId("thread-subagent-mcp-recover-root");
+
+        const initial = yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          cwd: "/tmp/project-recover-root",
+          runtimeMode: "full-access",
+          canSpawn: true,
+        });
+        const initialStartInput = routing.codex.startSession.mock.calls[
+          routing.codex.startSession.mock.calls.length - 1
+        ]?.[0] as ProviderSessionStartInput | undefined;
+        const initialToken = initialStartInput?.subagentMcp?.token;
+
+        // canSpawn must be persisted into runtimePayload, since recovery has no
+        // caller-supplied ProviderSessionStartInput to read it from.
+        const persistedBinding = yield* directory.getBinding(threadId);
+        assert.equal(Option.isSome(persistedBinding), true);
+        if (Option.isSome(persistedBinding)) {
+          const runtimePayload = persistedBinding.value.runtimePayload as
+            | Record<string, unknown>
+            | null
+            | undefined;
+          assert.equal(runtimePayload?.canSpawn, true);
+        }
+
+        // Force the recovery path: the adapter no longer has a live session for
+        // this thread, but the directory still has a persisted resume cursor.
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+
+        yield* provider.sendTurn({
+          threadId: initial.threadId,
+          input: "resume after idle stop",
+          attachments: [],
+        });
+
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        const resumedStartInput = routing.codex.startSession.mock.calls[0]?.[0] as
+          | ProviderSessionStartInput
+          | undefined;
+        const subagentMcp = resumedStartInput?.subagentMcp;
+        assert.equal(typeof subagentMcp === "object" && subagentMcp !== null, true);
+        assert.equal(subagentMcp?.url.endsWith(SUBAGENT_MCP_ROUTE_PATH), true);
+        assert.equal(typeof subagentMcp?.token === "string" && subagentMcp.token.length > 0, true);
+        // Recovery must mint a fresh token rather than reusing the one from the
+        // original startSession call.
+        assert.notEqual(subagentMcp?.token, initialToken);
+
+        const identity = yield* sessionTokens.resolve(subagentMcp!.token);
+        assert.equal(Option.isSome(identity), true);
+        if (Option.isSome(identity)) {
+          assert.equal(identity.value.threadId, threadId);
+          assert.equal(identity.value.canSpawn, true);
+        }
+      }),
+  );
+
+  it.effect(
+    "reissues a canSpawn:false sub-agent MCP token when recovering a stale sub-agent-thread session",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const sessionTokens = yield* SessionTokenRegistry;
+        const threadId = asThreadId("thread-subagent-mcp-recover-child");
+
+        const initial = yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          cwd: "/tmp/project-recover-child",
+          runtimeMode: "full-access",
+        });
+
+        yield* routing.codex.stopAll();
+        routing.codex.startSession.mockClear();
+
+        yield* provider.sendTurn({
+          threadId: initial.threadId,
+          input: "resume after idle stop",
+          attachments: [],
+        });
+
+        assert.equal(routing.codex.startSession.mock.calls.length, 1);
+        const resumedStartInput = routing.codex.startSession.mock.calls[0]?.[0] as
+          | ProviderSessionStartInput
+          | undefined;
+        const token = resumedStartInput?.subagentMcp?.token;
+        assert.equal(typeof token === "string" && token.length > 0, true);
+
+        const identity = yield* sessionTokens.resolve(token!);
+        assert.equal(Option.isSome(identity), true);
+        if (Option.isSome(identity)) {
+          assert.equal(identity.value.threadId, threadId);
+          assert.equal(identity.value.canSpawn, false);
+        }
+      }),
   );
 
   it.effect(
