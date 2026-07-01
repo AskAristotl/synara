@@ -55,6 +55,26 @@ describe("hostStore", () => {
     expect(useHostStore.getState().getActiveHost().label).toBe("Mac Studio");
   });
 
+  it("generates a host id in an insecure context where crypto.randomUUID is absent", () => {
+    // A phone connecting over plain http:// (a non-secure context) has no
+    // crypto.randomUUID; addRemoteHost must still mint an id via the fallback.
+    const originalCrypto = globalThis.crypto;
+    vi.stubGlobal("crypto", {
+      ...originalCrypto,
+      getRandomValues: originalCrypto?.getRandomValues?.bind(originalCrypto),
+      randomUUID: undefined,
+    });
+    try {
+      const host = useHostStore
+        .getState()
+        .addRemoteHost({ label: "Studio", baseUrl: "https://studio.ts.net:3773" });
+      expect(host.id).toMatch(/^host_/);
+      expect(host.id.length).toBeGreaterThan("host_".length + 8);
+    } finally {
+      vi.stubGlobal("crypto", originalCrypto);
+    }
+  });
+
   it("refuses to remove the local host and falls back to local when removing the active host", () => {
     const host = useHostStore
       .getState()

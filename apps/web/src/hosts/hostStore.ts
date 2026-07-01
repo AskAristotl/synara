@@ -7,6 +7,8 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { randomUUID } from "../lib/utils";
+
 export type HostKind = "local" | "remote";
 
 export interface Host {
@@ -36,7 +38,9 @@ function normalizeBaseUrl(raw: string): string {
 }
 
 function generateHostId(): string {
-  return `host_${crypto.randomUUID()}`;
+  // Use the shared helper (not raw crypto.randomUUID) — the phone connects over
+  // plain http:// (an insecure context) where crypto.randomUUID is undefined.
+  return `host_${randomUUID()}`;
 }
 
 export interface HostStoreState {
