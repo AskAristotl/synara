@@ -93,7 +93,7 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import { MERMAID_CAPABILITY_INSTRUCTION } from "../diagramCapability";
+import { RENDERABLE_CAPABILITIES_INSTRUCTION } from "../diagramCapability";
 import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../planMode.ts";
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -808,7 +808,7 @@ export const EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND = [
   "Do not present the host app as Claude Code unless the user is explicitly asking about Claude Code.",
   "Treat the current working directory as the active workspace for the task.",
   "When the user asks about the current project, codebase, or repository, proactively inspect files in the current working directory before asking the user where to look.",
-  MERMAID_CAPABILITY_INSTRUCTION,
+  RENDERABLE_CAPABILITIES_INSTRUCTION,
 ].join("\n");
 
 function buildClaudeSdkSubagents(): Record<string, AgentDefinition> {

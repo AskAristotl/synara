@@ -47,7 +47,7 @@ import {
   isCodexCliVersionSupported,
   parseCodexCliVersion,
 } from "./provider/codexCliVersion";
-import { MERMAID_CAPABILITY_INSTRUCTION } from "./provider/diagramCapability";
+import { RENDERABLE_CAPABILITIES_INSTRUCTION } from "./provider/diagramCapability";
 import { isNonFatalCodexErrorMessage } from "./codexErrorClassification.ts";
 import { buildCodexProcessEnv } from "./codexProcessEnv.ts";
 import { ensureIsolatedScratchWorkspace } from "./scratchWorkspaces.ts";
@@ -327,11 +327,11 @@ Use \`Computer Use\` only when at least one of these is true:
 
 Do not choose \`Computer Use\` first for ordinary browser inspection, browser screenshots, or browser navigation when the in-app browser can handle the request.`;
 
-const CODEX_DIAGRAM_INSTRUCTIONS = `
+const CODEX_RENDER_CAPABILITY_INSTRUCTIONS = `
 
-## Diagrams
+## Rendering
 
-${MERMAID_CAPABILITY_INSTRUCTION}`;
+${RENDERABLE_CAPABILITIES_INSTRUCTION}`;
 
 export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
@@ -453,7 +453,7 @@ plan content should be human and agent digestible. The final plan must be plan-o
 Do not ask "should I proceed?" in the final output. The user can easily switch out of Plan mode and request implementation if you have included a \`<proposed_plan>\` block in your response. Alternatively, they can decide to stay in Plan mode and continue refining the plan.
 
 Only produce at most one \`<proposed_plan>\` block per turn, and only when you are presenting a complete spec.
-</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}${CODEX_DIAGRAM_INSTRUCTIONS}`;
+</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}${CODEX_RENDER_CAPABILITY_INSTRUCTIONS}`;
 
 export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Collaboration Mode: Default
 
@@ -466,7 +466,7 @@ Your active mode changes only when new developer instructions with a different \
 The \`request_user_input\` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error.
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
-</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}${CODEX_DIAGRAM_INSTRUCTIONS}`;
+</collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}${CODEX_RENDER_CAPABILITY_INSTRUCTIONS}`;
 
 // Builds the per-thread `config` overlay that registers the sub-agent MCP server as a
 // streamable-HTTP `mcp_servers` entry named `synara`. Codex app-server's `thread/start`

@@ -2692,3 +2692,28 @@ diffs-container {
 .chat-markdown .chat-markdown-mermaid:hover .chat-markdown-mermaid__actions {
   opacity: 1;
 }
+
+.chat-markdown .chat-markdown-html-artifact {
+  position: relative;
+  margin: 0.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: var(--card);
+}
+.chat-markdown .chat-markdown-html-artifact__content {
+  padding: 1rem;
+}
+.chat-markdown .chat-markdown-html-artifact__actions {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+  z-index: 1;
+}
+.chat-markdown .chat-markdown-html-artifact:hover .chat-markdown-html-artifact__actions {
+  opacity: 1;
+}

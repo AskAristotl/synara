@@ -24,6 +24,12 @@ vi.mock("../lib/mermaidRendering", () => ({
   getMermaidSvgPromise: () => new Promise(() => {}),
 }));
 
+vi.mock("../lib/htmlArtifactRendering", () => ({
+  createHtmlArtifactCacheKey: () => "key",
+  getCachedSanitizedHtml: () => "<button>Preview</button>",
+  getSanitizedHtmlPromise: () => new Promise(() => {}),
+}));
+
 async function renderMarkdown(
   text: string,
   cwd = "C:\\Users\\LENOVO\\dpcode",
@@ -263,6 +269,17 @@ describe("ChatMarkdown", () => {
   it("still routes non-mermaid fences to the code block", async () => {
     const markup = await renderMarkdown("```ts\nconst x = 1;\n```");
     expect(markup).not.toContain("chat-markdown-mermaid");
+    expect(markup).toContain("chat-markdown-codeblock");
+  });
+
+  it("routes an html-preview fence to the html artifact component", async () => {
+    const markup = await renderMarkdown("```html-preview\n<button>Hi</button>\n```");
+    expect(markup).toContain("chat-markdown-html-artifact");
+  });
+
+  it("still routes a plain html fence to the code block", async () => {
+    const markup = await renderMarkdown("```html\n<button>Hi</button>\n```");
+    expect(markup).not.toContain("chat-markdown-html-artifact");
     expect(markup).toContain("chat-markdown-codeblock");
   });
 });

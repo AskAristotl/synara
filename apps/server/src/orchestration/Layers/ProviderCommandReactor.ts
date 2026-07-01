@@ -41,7 +41,7 @@ import {
 } from "../../checkpointing/Utils.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
-import { diagramCapabilityPreambleFor } from "../../provider/diagramCapability.ts";
+import { renderableCapabilitiesPreambleFor } from "../../provider/diagramCapability.ts";
 import { ProviderAdapterRequestError, ProviderServiceError } from "../../provider/Errors.ts";
 import { buildInlineSkillInstructions } from "../../provider/skillPromptInjection.ts";
 import {
@@ -943,15 +943,16 @@ const make = Effect.gen(function* () {
     const providerInputWithSkills = skillInlineText
       ? `${providerInput}\n\n${skillInlineText}`
       : providerInput;
-    // Providers without a system-prompt channel are told once, on the first turn of
-    // the thread, that they can draft renderable mermaid diagrams. Codex/Claude get
-    // this via their system channels instead, so the helper returns "" for them.
-    const diagramCapabilityText = diagramCapabilityPreambleFor(
+    // Providers without a system-prompt channel are told once, on the first turn of the
+    // thread, which content Synara can render inline (mermaid diagrams + html previews).
+    // Codex/Claude get this via their system channels instead, so the helper returns ""
+    // for them.
+    const renderCapabilityText = renderableCapabilitiesPreambleFor(
       selectedProvider as ProviderKind,
       activeSessionBeforeEnsure === undefined,
     );
-    const providerInputWithCapability = diagramCapabilityText
-      ? `${providerInputWithSkills}\n\n${diagramCapabilityText}`
+    const providerInputWithCapability = renderCapabilityText
+      ? `${providerInputWithSkills}\n\n${renderCapabilityText}`
       : providerInputWithSkills;
     const normalizedInput = toNonEmptyProviderInput(
       normalizeSkillMentionTextForProvider({

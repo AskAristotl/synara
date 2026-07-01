@@ -40,6 +40,7 @@ import { resolveMarkdownFileLinkTarget, rewriteMarkdownFileUriHref } from "../ma
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { GeneratedMarkdownImage } from "./chat/GeneratedMarkdownImage";
 import MermaidDiagram from "./chat/MermaidDiagram";
+import HtmlArtifact from "./chat/HtmlArtifact";
 import {
   COMPOSER_INLINE_CHIP_ICON_LABEL_GAP_CLASS_NAME,
   COMPOSER_INLINE_CHIP_TOKEN_ICON_CLASS_NAME,
@@ -1015,12 +1016,17 @@ function ChatMarkdown({
         const fence = parseCodeFenceInfo(extractRawFenceInfo(codeBlock.className));
         const code = dedentCode(codeBlock.code);
 
+        // ```html-preview renders live (sanitized); its source fallback still
+        // highlights as ordinary html so streaming/errors show readable source.
+        const isHtmlPreview = fence.language === "html-preview";
+        const highlightFence = isHtmlPreview ? { ...fence, language: "html" } : fence;
+
         const shikiCodeBlock = (
-          <MarkdownCodeBlock code={code} fence={fence}>
+          <MarkdownCodeBlock code={code} fence={highlightFence}>
             <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
               <Suspense fallback={<pre {...props}>{children}</pre>}>
                 <SuspenseShikiCodeBlock
-                  language={fence.language}
+                  language={highlightFence.language}
                   code={code}
                   themeName={diffThemeName}
                   isStreaming={isStreaming}
@@ -1039,6 +1045,12 @@ function ChatMarkdown({
               onImageExpand={onImageExpand}
               sourceFallback={shikiCodeBlock}
             />
+          );
+        }
+
+        if (isHtmlPreview) {
+          return (
+            <HtmlArtifact code={code} isStreaming={isStreaming} sourceFallback={shikiCodeBlock} />
           );
         }
 
