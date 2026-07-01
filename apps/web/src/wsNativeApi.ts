@@ -83,6 +83,37 @@ const orchestrationThreadEventListeners = new Set<
 const fallbackBrowserStateListeners = new Set<(state: ThreadBrowserState) => void>();
 const fallbackBrowserStates = new Map<ThreadId, ThreadBrowserState>();
 
+let domainEventChannelUnsubscribe: (() => void) | null = null;
+
+// The raw domain-event channel streams EVERY orchestration event; only pay for
+// it (server stream + wire traffic) while something is actually listening.
+function syncDomainEventChannelSubscription(transport: WsTransport): void {
+  const shouldSubscribe = orchestrationDomainEventListeners.size > 0;
+  if (shouldSubscribe && !domainEventChannelUnsubscribe) {
+    domainEventChannelUnsubscribe = transport.subscribe(
+      ORCHESTRATION_WS_CHANNELS.domainEvent,
+      (message) => {
+        const payload = message.data;
+        for (const listener of orchestrationDomainEventListeners) {
+          try {
+            listener(payload);
+          } catch {
+            // Swallow listener errors
+          }
+        }
+      },
+    );
+  } else if (!shouldSubscribe && domainEventChannelUnsubscribe) {
+    domainEventChannelUnsubscribe();
+    domainEventChannelUnsubscribe = null;
+  }
+}
+
+/** Ask the shared transport to attempt a reconnect immediately (no page reload). */
+export function requestTransportReconnect(): void {
+  instance?.transport.requestReconnectNow();
+}
+
 function defaultBrowserState(threadId: ThreadId): ThreadBrowserState {
   return {
     threadId,
@@ -394,16 +425,6 @@ export function createWsNativeApi(
       }
     }
   });
-  transport.subscribe(ORCHESTRATION_WS_CHANNELS.domainEvent, (message) => {
-    const payload = message.data;
-    for (const listener of orchestrationDomainEventListeners) {
-      try {
-        listener(payload);
-      } catch {
-        // Swallow listener errors
-      }
-    }
-  });
   transport.subscribe(ORCHESTRATION_WS_CHANNELS.shellEvent, (message) => {
     const payload = message.data;
     for (const listener of orchestrationShellEventListeners) {
@@ -676,8 +697,10 @@ export function createWsNativeApi(
         transport.request<void>(ORCHESTRATION_WS_METHODS.unsubscribeThread, input),
       onDomainEvent: (callback) => {
         orchestrationDomainEventListeners.add(callback);
+        syncDomainEventChannelSubscription(transport);
         return () => {
           orchestrationDomainEventListeners.delete(callback);
+          syncDomainEventChannelSubscription(transport);
         };
       },
       onShellEvent: (callback) => {
@@ -899,6 +922,7 @@ export function createWsNativeApi(
 export function resetWsNativeApiForTest(): void {
   instance?.transport.dispose();
   instance = null;
+  domainEventChannelUnsubscribe = null;
   welcomeListeners.clear();
   serverConfigUpdatedListeners.clear();
   serverProviderStatusesUpdatedListeners.clear();
@@ -919,6 +943,7 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     instance?.transport.dispose();
     instance = null;
+    domainEventChannelUnsubscribe = null;
     welcomeListeners.clear();
     serverConfigUpdatedListeners.clear();
     serverProviderStatusesUpdatedListeners.clear();

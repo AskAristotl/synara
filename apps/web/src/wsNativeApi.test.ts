@@ -362,6 +362,25 @@ describe("wsNativeApi", () => {
     expect(lateListener).toHaveBeenCalledWith(payload);
   });
 
+  it("only subscribes the orchestration domain channel while listeners exist", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const domainSubscribeCalls = () =>
+      subscribeMock.mock.calls.filter(
+        ([channel]) => channel === ORCHESTRATION_WS_CHANNELS.domainEvent,
+      ).length;
+
+    expect(domainSubscribeCalls()).toBe(0);
+
+    const off = api.orchestration.onDomainEvent(() => undefined);
+    expect(domainSubscribeCalls()).toBe(1);
+    expect(channelListeners.has(ORCHESTRATION_WS_CHANNELS.domainEvent)).toBe(true);
+
+    off();
+    expect(channelListeners.has(ORCHESTRATION_WS_CHANNELS.domainEvent)).toBe(false);
+  });
+
   it("forwards valid terminal and orchestration events", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");
 
