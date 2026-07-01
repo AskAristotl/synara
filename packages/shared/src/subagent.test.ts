@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampWaitSeconds,
   isTerminalStatus,
+  SUBAGENT_DIFF_SETTLE_SECONDS,
   SUBAGENT_MAX_LIVE_PER_ROOT,
   SUBAGENT_WAIT_MAX_SECONDS,
 } from "./subagent";
@@ -22,6 +23,16 @@ describe("SUBAGENT_MAX_LIVE_PER_ROOT", () => {
 describe("SUBAGENT_WAIT_MAX_SECONDS", () => {
   it("is 600", () => {
     expect(SUBAGENT_WAIT_MAX_SECONDS).toBe(600);
+  });
+});
+
+describe("SUBAGENT_DIFF_SETTLE_SECONDS", () => {
+  it("is 5", () => {
+    expect(SUBAGENT_DIFF_SETTLE_SECONDS).toBe(5);
+  });
+
+  it("is well within SUBAGENT_WAIT_MAX_SECONDS", () => {
+    expect(SUBAGENT_DIFF_SETTLE_SECONDS).toBeLessThan(SUBAGENT_WAIT_MAX_SECONDS);
   });
 });
 

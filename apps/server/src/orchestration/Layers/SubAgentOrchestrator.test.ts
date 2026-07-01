@@ -1495,8 +1495,13 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
 
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // timeoutSeconds:1 (rather than a large value) keeps this test fast:
+      // this child is worktree+branch with no file-bearing checkpoint, so
+      // (Task 4.3b) `wait` now briefly settles for one before finalizing --
+      // a small overall timeout clamps that settle window down to ~1s
+      // instead of the full SUBAGENT_DIFF_SETTLE_SECONDS grace window.
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -1526,8 +1531,10 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
 
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      // See the sibling "no checkpoints at all" test above for why
+      // timeoutSeconds:1 (Task 4.3b settle interaction).
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -1567,6 +1574,141 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
       );
 
       expect(results[0]?.diff).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", () => {
+  /** A worktree child at a given checkpoint list, everything else held fixed. */
+  function settleThread(
+    child: ThreadId,
+    branch: string,
+    checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+  ): OrchestrationThread {
+    return makeThread({
+      id: child,
+      envMode: "worktree",
+      branch,
+      checkpoints,
+      messages: [{ role: "assistant", text: "done" }],
+      session: makeSession(child, {
+        status: "running",
+        activeTurnId: TurnId.makeUnsafe(randomUUID()),
+      }),
+      latestTurnState: "running",
+    });
+  }
+
+  it("settles for a worktree child's file-bearing checkpoint before finalizing, capturing the diff", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // Session goes idle-completed with NO file-bearing checkpoint yet -- the
+    // mainline race this task fixes: CheckpointReactor (real git I/O,
+    // independently forked off the same domain-event stream) hasn't landed
+    // the checkpoint by the time the session-set that unblocks `wait` fires.
+    setThread(settleThread(child, "subagent/settle", []));
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const startedAt = Date.now();
+      const waitPromise = runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 5 })),
+      );
+      // Simulate CheckpointReactor's independent, concurrently-forked git I/O
+      // landing the real file-bearing checkpoint shortly after -- well within
+      // the (default 5s) grace window.
+      setTimeout(() => {
+        setThread(
+          settleThread(child, "subagent/settle", [
+            makeCheckpoint({
+              checkpointTurnCount: 1,
+              files: [makeCheckpointFile({ path: "src/a.ts", additions: 3, deletions: 1 })],
+            }),
+          ]),
+        );
+      }, 100);
+      const results = await waitPromise;
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.diff).toEqual({
+        branch: "subagent/settle",
+        filesChanged: 1,
+        summary: "1 file changed, +3/-1",
+      });
+      // Resolves promptly after the checkpoint appears -- well under the
+      // grace window (which defaults to SUBAGENT_DIFF_SETTLE_SECONDS = 5s).
+      expect(elapsedMs).toBeLessThan(2000);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns diff:null after the grace window elapses when no checkpoint ever arrives (no hang)", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(settleThread(child, "subagent/never", []));
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const startedAt = Date.now();
+      // A small overall timeoutSeconds (clamps to the 1s floor) keeps the
+      // settle window short in this test: the effective grace window is
+      // min(SUBAGENT_DIFF_SETTLE_SECONDS, remaining overall timeout), and the
+      // remaining overall timeout here is ~1s (the child resolves via the
+      // already-buffered event almost instantly, so nearly the whole clamped
+      // 1s budget is still "remaining" when settle starts).
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+      );
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.diff).toBeNull();
+      // Bounded by the overall clamped timeout -- does not hang waiting for a
+      // checkpoint that never arrives.
+      expect(elapsedMs).toBeLessThan(3000);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("does not settle a share-cwd (envMode:'local') child -- finalizes immediately with diff:null", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "local",
+        checkpoints: [],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const startedAt = Date.now();
+      const results = await runtime.runPromise(
+        // A generous timeoutSeconds -- if the share child were (wrongly)
+        // subjected to settle it would take multiple seconds; asserting a
+        // tight elapsed bound below proves it wasn't.
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.diff).toBeNull();
+      expect(elapsedMs).toBeLessThan(500);
     } finally {
       await runtime.dispose();
     }

@@ -51,7 +51,11 @@ import {
 import { Deferred, Duration, Effect, Layer, Option, PubSub } from "effect";
 
 import { getDefaultModel } from "@t3tools/shared/model";
-import { clampWaitSeconds, SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
+import {
+  clampWaitSeconds,
+  SUBAGENT_DIFF_SETTLE_SECONDS,
+  SUBAGENT_WAIT_MAX_SECONDS,
+} from "@t3tools/shared/subagent";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
@@ -66,6 +70,17 @@ import {
 } from "../Services/SubAgentOrchestrator.ts";
 
 const SUBAGENT_TITLE_MAX_CHARS = 80;
+
+/**
+ * Poll interval (ms) `wait`'s settle phase (Task 4.3b) re-reads a worktree
+ * child's projection while waiting for its file-bearing checkpoint to land.
+ * Small relative to `SUBAGENT_DIFF_SETTLE_SECONDS`'s default 5s grace
+ * window -- prompt without being a busy loop (at most ~100 reads over the
+ * default window), and it only ever runs for the handful of worktree
+ * children that are already "completed" but still checkpoint-less at settle
+ * time.
+ */
+const SUBAGENT_DIFF_SETTLE_POLL_MILLIS = 50;
 
 /**
  * Build the per-provider `ModelSelection` variant for a spawn. `ModelSelection`
@@ -359,6 +374,72 @@ export const SubAgentOrchestratorLive = Layer.effect(
         ),
       );
 
+    // Task 4.3b: `wait` resolves a worktree child's outcome to "completed" the
+    // moment its session goes idle (`thread.session-set`), but the
+    // authoritative file-bearing checkpoint (`thread.turn-diff-completed`,
+    // status "ready") is produced by CheckpointReactor -- an INDEPENDENT,
+    // concurrently-forked consumer of the same domain-event stream that does
+    // real git I/O -- which usually lands AFTER that session-set. Read
+    // straight off `buildSubAgentResult`'s final envelope build at that
+    // instant would therefore usually see `diff: null` for the mainline
+    // "spawn -> edit -> report" worktree pattern, even though the child truly
+    // did produce a checkpoint moments later.
+    //
+    // `settleForFileBearingCheckpoint` closes that gap: for a worktree child
+    // (envMode "worktree", non-null branch) whose outcome is ALREADY
+    // "completed" (this is only ever called from `wait`'s step 5, after the
+    // session-idle transition has already been classified -- it never marks a
+    // still-running child completed and never touches `outcomes`/
+    // `isResolved`/mode "all"/"any" semantics), poll `readChildThread` on a
+    // short interval (`SUBAGENT_DIFF_SETTLE_POLL_MILLIS`) until EITHER a
+    // file-bearing checkpoint appears (`latestCheckpointWithFiles` non-null)
+    // or `waitDeadlineMillis` is reached, whichever comes first.
+    // `waitDeadlineMillis` is the SAME absolute deadline `wait`'s own overall
+    // clamped timeout is bounded by (computed once, at the top of `wait`), so
+    // this can only ever consume time budget already available within the
+    // caller's requested `timeoutSeconds` -- it never extends `wait`'s total
+    // bound. The grace window this settle actually gets is additionally
+    // capped by `SUBAGENT_DIFF_SETTLE_SECONDS` (evaluated fresh, from "now",
+    // each time this is called) so a single very-long `timeoutSeconds` still
+    // only buys a short, bounded settle rather than the whole remaining
+    // budget. The background domain-event drain fiber `wait` forked in step 3
+    // is still alive throughout (this runs inside the same `Effect.scoped`
+    // block, before that scope closes) -- no new subscription is created
+    // here.
+    const settleForFileBearingCheckpoint = (
+      agentId: ThreadId,
+      thread: OrchestrationThread,
+      outcome: SubAgentTerminalOutcome | null,
+      waitDeadlineMillis: number,
+    ): Effect.Effect<OrchestrationThread, SubAgentError> => {
+      const eligible =
+        outcome === "completed" && thread.envMode === "worktree" && thread.branch !== null;
+      if (!eligible || latestCheckpointWithFiles(thread.checkpoints) !== null) {
+        return Effect.succeed(thread);
+      }
+      const settleDeadlineMillis = Math.min(
+        waitDeadlineMillis,
+        Date.now() + SUBAGENT_DIFF_SETTLE_SECONDS * 1000,
+      );
+      return Effect.gen(function* () {
+        let current = thread;
+        while (
+          latestCheckpointWithFiles(current.checkpoints) === null &&
+          Date.now() < settleDeadlineMillis
+        ) {
+          const remainingMillis = settleDeadlineMillis - Date.now();
+          yield* Effect.sleep(
+            Duration.millis(Math.min(SUBAGENT_DIFF_SETTLE_POLL_MILLIS, remainingMillis)),
+          );
+          const threadOption = yield* readChildThread(agentId);
+          if (Option.isSome(threadOption)) {
+            current = threadOption.value;
+          }
+        }
+        return current;
+      });
+    };
+
     // Provision a REAL isolated Git worktree for a `workspace:"worktree"`
     // spawn (Task 4.1): resolve the parent PROJECT's repo root (not the
     // caller's own, possibly-already-isolated, workspace) via
@@ -551,6 +632,12 @@ export const SubAgentOrchestratorLive = Layer.effect(
           const timeoutSeconds = clampWaitSeconds(
             input.timeoutSeconds ?? SUBAGENT_WAIT_MAX_SECONDS,
           );
+          // The single absolute deadline this whole `wait` call is bounded
+          // by -- both step 4's overall resolution wait AND (Task 4.3b) each
+          // worktree child's post-completion checkpoint settle are clamped
+          // against this SAME instant, so settling never extends `wait`'s
+          // total bound past the caller's (clamped) `timeoutSeconds`.
+          const waitDeadlineMillis = Date.now() + timeoutSeconds * 1000;
           const mode = input.mode ?? "all";
           const agentIds = input.agentIds;
           const targetIds = new Set<string>(agentIds);
@@ -678,6 +765,13 @@ export const SubAgentOrchestratorLive = Layer.effect(
           yield* Deferred.await(done).pipe(Effect.timeoutOption(Duration.seconds(timeoutSeconds)));
 
           // 5. Build one envelope per agentId, in input order, from a fresh read.
+          //    (Task 4.3b) A worktree child that just resolved "completed"
+          //    gets one extra step here: settleForFileBearingCheckpoint
+          //    briefly polls for its file-bearing checkpoint (bounded by
+          //    waitDeadlineMillis) before the envelope is built, so `diff`
+          //    isn't usually null for the mainline worktree pattern. Every
+          //    other child (share/local, failed, interrupted, still running)
+          //    is a same-tick no-op passthrough -- no behavior change.
           const results: SubAgentResult[] = [];
           for (const agentId of agentIds) {
             const threadOption = yield* readChildThread(agentId);
@@ -689,9 +783,14 @@ export const SubAgentOrchestratorLive = Layer.effect(
                 }),
               );
             }
-            results.push(
-              buildSubAgentResult(agentId, threadOption.value, outcomes.get(agentId) ?? null),
+            const outcome = outcomes.get(agentId) ?? null;
+            const thread = yield* settleForFileBearingCheckpoint(
+              agentId,
+              threadOption.value,
+              outcome,
+              waitDeadlineMillis,
             );
+            results.push(buildSubAgentResult(agentId, thread, outcome));
           }
           return results;
         }),
