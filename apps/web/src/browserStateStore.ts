@@ -8,6 +8,7 @@
 import type { ThreadBrowserState, ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { isPlainObject, sanitizeStringKeyedRecord } from "./persistedRecord";
 
 const BROWSER_STATE_STORAGE_KEY = "synara:browser-state:v1";
@@ -211,6 +212,11 @@ export const useBrowserStateStore = create<BrowserStateStore>()(
       }),
     },
   ),
+);
+
+// Reset on host switch — browser tab/history state references threads that only exist on one host.
+registerHostScopedReset(() =>
+  useBrowserStateStore.setState(useBrowserStateStore.getInitialState(), true),
 );
 
 export function selectThreadBrowserState(

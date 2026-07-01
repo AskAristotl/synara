@@ -31,7 +31,7 @@ type BootstrapExchangeResult = {
 };
 
 const AUTHORIZATION_PREFIX = "Bearer ";
-const WEBSOCKET_TOKEN_QUERY_PARAM = "wsToken";
+export const WEBSOCKET_TOKEN_QUERY_PARAM = "wsToken";
 
 export function toBootstrapExchangeAuthError(cause: BootstrapCredentialError): AuthError {
   if (cause.status === 500) {
@@ -378,6 +378,17 @@ export const makeServerAuth = Effect.gen(function* () {
       }),
     );
 
+  const issueClientPairingUrl: ServerAuthShape["issueClientPairingUrl"] = (baseUrl, input) =>
+    issuePairingCredential({ ...(input ?? {}), role: "client" }).pipe(
+      Effect.map((issued) => {
+        const url = new URL(baseUrl);
+        url.pathname = "/pair";
+        url.searchParams.delete("token");
+        url.hash = new URLSearchParams([["token", issued.credential]]).toString();
+        return url.toString();
+      }),
+    );
+
   return {
     getDescriptor: () => Effect.succeed(descriptor),
     getSessionState,
@@ -393,6 +404,7 @@ export const makeServerAuth = Effect.gen(function* () {
     authenticateWebSocketUpgrade,
     issueWebSocketToken,
     issueStartupPairingUrl,
+    issueClientPairingUrl,
   } satisfies ServerAuthShape;
 });
 

@@ -6,6 +6,7 @@
 import type { GitReadWorkingTreeDiffInput } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 export type RepoDiffScope = NonNullable<GitReadWorkingTreeDiffInput["scope"]>;
 
@@ -55,4 +56,9 @@ export const useRepoDiffScopeStore = create<RepoDiffScopeStore>()(
       },
     },
   ),
+);
+
+// Reset on host switch — the diff scope choice is a per-repo/host UI preference.
+registerHostScopedReset(() =>
+  useRepoDiffScopeStore.setState(useRepoDiffScopeStore.getInitialState(), true),
 );

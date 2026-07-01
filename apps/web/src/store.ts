@@ -48,6 +48,7 @@ import { deriveThreadSummaryMetadata } from "@t3tools/shared/threadSummary";
 import { getThreadFromState, getThreadsFromState } from "./threadDerivation";
 import { toAttachmentPreviewUrl } from "./lib/wsHttpUrl";
 import { isStalePendingRequestFailureDetail } from "./lib/pendingInteraction";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -4433,6 +4434,9 @@ export const useStore = create<AppStore>((set) => ({
   setThreadWorkspace: (threadId, patch) =>
     set((state) => setThreadWorkspace(state, threadId, patch)),
 }));
+
+// Reset thread/project state on host switch (merge, not replace, to keep action methods).
+registerHostScopedReset(() => useStore.setState(initialState));
 
 // Persist state changes with debouncing to avoid localStorage thrashing
 useStore.subscribe((state) => {

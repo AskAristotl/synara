@@ -1,5 +1,6 @@
 import { type ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 interface TemporaryThreadStoreState {
   temporaryThreadIds: Record<ThreadId, true | undefined>;
@@ -35,3 +36,8 @@ export const useTemporaryThreadStore = create<TemporaryThreadStoreState>((set) =
     });
   },
 }));
+
+// Reset to initial state on host switch; temporary thread ids only exist on one host.
+registerHostScopedReset(() =>
+  useTemporaryThreadStore.setState(useTemporaryThreadStore.getInitialState(), true),
+);

@@ -6,6 +6,7 @@
 import { type ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { normalizePinnedIds, pinId, prunePinnedIds, unpinId } from "./pinning.logic";
 
 interface PinnedThreadsStoreState {
@@ -81,4 +82,9 @@ export const usePinnedThreadsStore = create<PinnedThreadsStoreState>()(
       },
     },
   ),
+);
+
+// Reset on host switch — pinned ids reference one host's projects/threads.
+registerHostScopedReset(() =>
+  usePinnedThreadsStore.setState(usePinnedThreadsStore.getInitialState(), true),
 );

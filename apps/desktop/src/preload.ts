@@ -29,6 +29,9 @@ const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
 const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
+const SECURE_CREDENTIAL_GET_CHANNEL = "desktop:secure-credential-get";
+const SECURE_CREDENTIAL_SET_CHANNEL = "desktop:secure-credential-set";
+const SECURE_CREDENTIAL_DELETE_CHANNEL = "desktop:secure-credential-delete";
 const ZOOM_FACTOR_CHANNEL = "desktop:zoom-factor";
 const ZOOM_FACTOR_CHANGED_CHANNEL = "desktop:zoom-factor-changed";
 
@@ -118,6 +121,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   notifications: {
     isSupported: () => ipcRenderer.invoke(NOTIFICATIONS_IS_SUPPORTED_CHANNEL),
     show: (input) => ipcRenderer.invoke(NOTIFICATIONS_SHOW_CHANNEL, input),
+  },
+  secureCredentialStore: {
+    get: (key) => ipcRenderer.invoke(SECURE_CREDENTIAL_GET_CHANNEL, key),
+    set: (key, value) => ipcRenderer.invoke(SECURE_CREDENTIAL_SET_CHANNEL, key, value),
+    delete: (key) => ipcRenderer.invoke(SECURE_CREDENTIAL_DELETE_CHANNEL, key),
   },
   server: {
     transcribeVoice: (input) => ipcRenderer.invoke(SERVER_TRANSCRIBE_VOICE_CHANNEL, input),

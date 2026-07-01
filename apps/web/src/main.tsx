@@ -10,6 +10,7 @@ import { appHistory } from "./appNavigation";
 import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
 import { isElectron } from "./env";
+import { registerServiceWorker } from "./registerServiceWorker";
 
 const router = getRouter(appHistory);
 
@@ -18,6 +19,8 @@ document.title = APP_DISPLAY_NAME;
 if (isElectron) {
   document.documentElement.dataset.runtime = "electron";
 }
+
+registerServiceWorker();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

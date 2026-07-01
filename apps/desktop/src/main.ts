@@ -20,6 +20,7 @@ import {
   nativeImage,
   nativeTheme,
   protocol,
+  safeStorage,
   session,
   shell,
   systemPreferences,
@@ -56,6 +57,7 @@ import {
 } from "./macIconCacheRefresh";
 import { openInitialBackendWindow } from "./initialBackendWindowOpen";
 import { shouldAllowMediaPermissionRequest } from "./mediaPermissions";
+import { makeSecureCredentialStore } from "./secureCredentialStore";
 import {
   installResumableUpdateDownloader,
   type ResumableDownloaderTarget,
@@ -150,6 +152,9 @@ const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
 const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
+const SECURE_CREDENTIAL_GET_CHANNEL = "desktop:secure-credential-get";
+const SECURE_CREDENTIAL_SET_CHANNEL = "desktop:secure-credential-set";
+const SECURE_CREDENTIAL_DELETE_CHANNEL = "desktop:secure-credential-delete";
 const BASE_DIR =
   process.env.SYNARA_HOME?.trim() ||
   process.env.DPCODE_HOME?.trim() ||
@@ -2193,6 +2198,32 @@ function requestGracefulAppQuit(reason: string): void {
     });
 }
 
+// Lazily constructed so `app.getPath("userData")` is only touched once the
+// Electron app is ready (calling it earlier throws). Do not hoist this to a
+// module-level constant.
+let secureCredentialStore: ReturnType<typeof makeSecureCredentialStore> | undefined;
+function getSecureCredentialStore(): ReturnType<typeof makeSecureCredentialStore> {
+  if (!secureCredentialStore) {
+    const credentialsFilePath = Path.join(app.getPath("userData"), "host-credentials.json");
+    secureCredentialStore = makeSecureCredentialStore({
+      isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (plain) => safeStorage.encryptString(plain),
+      decrypt: (cipher) => safeStorage.decryptString(cipher),
+      readFile: async () => {
+        try {
+          return await FS.promises.readFile(credentialsFilePath, "utf8");
+        } catch {
+          return "";
+        }
+      },
+      writeFile: async (contents) =>
+        FS.promises.writeFile(credentialsFilePath, contents, { mode: 0o600 }),
+      filePath: credentialsFilePath,
+    });
+  }
+  return secureCredentialStore;
+}
+
 function registerIpcHandlers(): void {
   ipcMain.removeAllListeners(DESKTOP_WS_URL_CHANNEL);
   ipcMain.on(DESKTOP_WS_URL_CHANNEL, (event: IpcMainEvent) => {
@@ -2489,6 +2520,31 @@ function registerIpcHandlers(): void {
         ...(typeof input?.threadId === "string" ? { threadId: input.threadId } : {}),
       }),
   );
+
+  ipcMain.removeHandler(SECURE_CREDENTIAL_GET_CHANNEL);
+  ipcMain.handle(SECURE_CREDENTIAL_GET_CHANNEL, async (_event, key: unknown) => {
+    if (typeof key !== "string") {
+      throw new Error("Invalid credential key.");
+    }
+    return getSecureCredentialStore().get(key);
+  });
+
+  ipcMain.removeHandler(SECURE_CREDENTIAL_SET_CHANNEL);
+  ipcMain.handle(SECURE_CREDENTIAL_SET_CHANNEL, async (_event, key: unknown, value: unknown) => {
+    if (typeof key !== "string" || typeof value !== "string") {
+      throw new Error("Invalid credential key or value.");
+    }
+    return getSecureCredentialStore().set(key, value);
+  });
+
+  ipcMain.removeHandler(SECURE_CREDENTIAL_DELETE_CHANNEL);
+  ipcMain.handle(SECURE_CREDENTIAL_DELETE_CHANNEL, async (_event, key: unknown) => {
+    if (typeof key !== "string") {
+      throw new Error("Invalid credential key.");
+    }
+    return getSecureCredentialStore().delete(key);
+  });
+
   registerDesktopVoiceTranscriptionHandler();
   startBrowserPerformanceLogging();
   void ensureBrowserUsePipeServer().catch((error) => {

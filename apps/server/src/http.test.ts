@@ -244,6 +244,8 @@ function makeFakeServerAuth(overrides: Partial<ServerAuthShape> = {}): ServerAut
       }),
     issueWebSocketToken: () => Effect.succeed({ token: "ws-token", expiresAt }),
     issueStartupPairingUrl: () => Effect.succeed("http://127.0.0.1:3773/pair#token=PAIRINGTOKEN"),
+    issueClientPairingUrl: () =>
+      Effect.succeed("http://127.0.0.1:3773/pair#token=CLIENTPAIRINGTOKEN"),
     ...overrides,
   } satisfies ServerAuthShape;
 }
@@ -386,6 +388,41 @@ describe("createHttpRequestHandler", () => {
           policy: "loopback-browser",
         },
       });
+    });
+  });
+
+  it("answers OPTIONS preflight on auth routes with CORS headers for t3://app", async () => {
+    const config = await makeConfig();
+    const handler = await makeHandler(config, {
+      serverAuth: makeFakeServerAuth(),
+      cookieName: "t3_session",
+    });
+
+    await withServer(handler, async (origin) => {
+      const response = await fetch(`${origin}/api/auth/session`, {
+        method: "OPTIONS",
+        headers: { origin: "t3://app" },
+      });
+
+      expect(response.status).toBe(204);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("t3://app");
+      expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+    });
+  });
+
+  it("includes CORS headers on GET /api/auth/session for t3://app", async () => {
+    const config = await makeConfig();
+    const handler = await makeHandler(config, {
+      serverAuth: makeFakeServerAuth(),
+      cookieName: "t3_session",
+    });
+
+    await withServer(handler, async (origin) => {
+      const response = await fetch(`${origin}/api/auth/session`, {
+        headers: { origin: "t3://app" },
+      });
+
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("t3://app");
     });
   });
 

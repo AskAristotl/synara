@@ -5,6 +5,7 @@
 import { type ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import {
   DEFAULT_WORKSPACE_LAYOUT_PRESET_ID,
   getWorkspaceLayoutPreset,
@@ -294,4 +295,9 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
       },
     },
   ),
+);
+
+// Reset to initial state on host switch; workspace pages are host-specific.
+registerHostScopedReset(() =>
+  useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true),
 );

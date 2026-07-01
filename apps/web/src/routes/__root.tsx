@@ -23,6 +23,7 @@ import { Throttler } from "@tanstack/react-pacer";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { DesktopWindowControls } from "../components/DesktopWindowControls";
+import { HostConnectionBanner } from "../components/hosts/HostConnectionBanner";
 import { SETTINGS_TARGETS } from "../settingsNavigation";
 import ShortcutsDialog from "../components/ShortcutsDialog";
 import WhatsNewDialog from "../components/WhatsNewDialog";
@@ -195,6 +196,7 @@ function RootRouteView() {
           <TaskCompletionNotifications />
           <ProviderUpdateNotifications />
           <DesktopProjectBootstrap />
+          <HostConnectionBanner />
           <Outlet />
         </AnchoredToastProvider>
       </ToastProvider>

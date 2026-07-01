@@ -38,3 +38,6 @@ __screenshots__/
 /browser-sidebar-comment-preload.js.map
 /preload.js.map
 /bootstrap.js.map
+
+# Native-tool git worktrees (isolated task workspaces)
+.claude/worktrees/

@@ -7,6 +7,7 @@ import type { ProjectId } from "@t3tools/contracts";
 import { clampThreadNotes } from "@t3tools/shared/pinnedMessages";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 const PROJECT_INSTRUCTIONS_STORAGE_KEY = "synara:project-instructions:v1";
 
@@ -62,6 +63,11 @@ export const useProjectInstructionsStore = create<ProjectInstructionsStore>()(
       storage: createJSONStorage(() => localStorage),
     },
   ),
+);
+
+// Reset on host switch — instructions are keyed by one host's project ids.
+registerHostScopedReset(() =>
+  useProjectInstructionsStore.setState(useProjectInstructionsStore.getInitialState(), true),
 );
 
 // Appends project instructions without clobbering thread notes a user already wrote.

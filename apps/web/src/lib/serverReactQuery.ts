@@ -1,4 +1,5 @@
 import type {
+  AuthRevokeClientSessionInput,
   ProviderKind,
   ServerListProviderUsageInput,
   ServerStopLocalServerInput,
@@ -18,6 +19,7 @@ export const serverQueryKeys = {
   settings: () => ["server", "settings"] as const,
   worktrees: () => ["server", "worktrees"] as const,
   localServers: () => ["server", "localServers"] as const,
+  authClients: () => ["server", "auth", "clients"] as const,
   providerUsage: (provider: ProviderKind | null | undefined, homePath?: string | null) =>
     ["server", "providerUsage", provider ?? null, homePath ?? null] as const,
   allProviderUsage: () => ["server", "allProviderUsage"] as const,
@@ -29,6 +31,7 @@ export const serverQueryKeys = {
 
 export const serverMutationKeys = {
   stopLocalServer: () => ["server", "mutation", "stopLocalServer"] as const,
+  revokeAuthClient: () => ["server", "mutation", "revokeAuthClient"] as const,
 };
 
 export function serverConfigQueryOptions() {
@@ -137,6 +140,33 @@ export function serverStopLocalServerMutationOptions(input: { queryClient: Query
     },
     onSettled: () => {
       void input.queryClient.invalidateQueries({ queryKey: serverQueryKeys.localServers() });
+    },
+  });
+}
+
+// Paired-device sessions for Settings → Devices. Owner-only on the server; a 403 surfaces
+// as a query error the panel renders inline.
+export function serverAuthClientsQueryOptions() {
+  return queryOptions({
+    queryKey: serverQueryKeys.authClients(),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      return api.server.listAuthClients();
+    },
+    staleTime: 15_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function serverRevokeAuthClientMutationOptions(input: { queryClient: QueryClient }) {
+  return mutationOptions({
+    mutationKey: serverMutationKeys.revokeAuthClient(),
+    mutationFn: async (revokeInput: AuthRevokeClientSessionInput) => {
+      const api = ensureNativeApi();
+      return api.server.revokeAuthClient(revokeInput);
+    },
+    onSettled: () => {
+      void input.queryClient.invalidateQueries({ queryKey: serverQueryKeys.authClients() });
     },
   });
 }

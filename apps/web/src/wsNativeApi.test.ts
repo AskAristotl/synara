@@ -68,6 +68,12 @@ vi.mock("./wsTransport", () => {
       getLatestPush(channel: string) {
         return latestPushByChannel.get(channel) ?? null;
       }
+      getState() {
+        return "disposed" as const;
+      }
+      dispose() {
+        // no-op: mirrors WsTransport#dispose for resetWsNativeApiForTest cleanup.
+      }
     },
   };
 });
@@ -91,6 +97,33 @@ function emitPush<C extends WsPushChannel>(channel: C, data: WsPushData<C>): voi
   for (const listener of listeners) {
     listener(message);
   }
+}
+
+// `createWsNativeApi()` (no-arg) now resolves the active host via
+// `getActiveHostConnection()`, which imports `hostStore`. Zustand's
+// `persist` + `createJSONStorage` hydrate from `localStorage` eagerly at
+// module-import time, and Node's Vitest environment has no global
+// `localStorage`. Stub a working in-memory localStorage before each test's
+// dynamic `import("./wsNativeApi")` so the host store can load without
+// throwing. Mirrors the pattern in hostStore.test.ts / workspaceStore.test.ts.
+function installMemoryLocalStorage(): void {
+  const entries = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: vi.fn((key: string) => entries.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      entries.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      entries.delete(key);
+    }),
+    clear: vi.fn(() => {
+      entries.clear();
+    }),
+    key: vi.fn((index: number) => Array.from(entries.keys())[index] ?? null),
+    get length() {
+      return entries.size;
+    },
+  });
 }
 
 function getWindowForTest(): Window & typeof globalThis & { desktopBridge?: unknown } {
@@ -122,6 +155,7 @@ beforeEach(() => {
   latestPushByChannel.clear();
   nextPushSequence = 1;
   Reflect.deleteProperty(getWindowForTest(), "desktopBridge");
+  installMemoryLocalStorage();
 });
 
 afterEach(() => {
@@ -811,5 +845,31 @@ describe("wsNativeApi", () => {
       WS_METHODS.serverTranscribeVoice,
       expect.anything(),
     );
+  });
+
+  it("routes auth requests through the active host connection", async () => {
+    // Build a fake connection that records calls.
+    const calls: string[] = [];
+    const connection = {
+      host: {
+        id: "host_x",
+        kind: "remote",
+        baseUrl: "https://x",
+        label: "X",
+        createdAt: 0,
+        lastConnectedAt: null,
+      },
+      requestAuthJson: async <T>(path: string) => {
+        calls.push(path);
+        return { authenticated: true } as unknown as T;
+      },
+      resolveSocketUrl: async () => "wss://x/ws?wsToken=T",
+    };
+    const { createWsNativeApi, resetWsNativeApiForTest } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi(connection as never);
+    await api.server.getAuthSession();
+    expect(calls).toContain("/api/auth/session");
+    resetWsNativeApiForTest();
   });
 });

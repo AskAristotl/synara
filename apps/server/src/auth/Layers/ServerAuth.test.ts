@@ -129,6 +129,18 @@ describe("ServerAuthLive", () => {
     );
   });
 
+  it("issues a client pairing URL with the /pair#token fragment", async () => {
+    await runServerAuthTest(
+      Effect.gen(function* () {
+        const serverAuth = yield* ServerAuth;
+
+        const url = yield* serverAuth.issueClientPairingUrl("http://127.0.0.1:3773");
+
+        expect(url).toContain("http://127.0.0.1:3773/pair#token=");
+      }),
+    );
+  });
+
   it("lists client sessions with the current owner marked", async () => {
     await runServerAuthTest(
       Effect.gen(function* () {

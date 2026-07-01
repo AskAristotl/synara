@@ -396,6 +396,11 @@ export interface DesktopBridge {
     onBrowserUseOpenPanelRequest: (listener: () => void) => () => void;
     onBrowserCopyLink: (listener: (event: BrowserCopyLinkEvent) => void) => () => void;
   };
+  secureCredentialStore?: {
+    get: (key: string) => Promise<string | null>;
+    set: (key: string, value: string) => Promise<void>;
+    delete: (key: string) => Promise<void>;
+  };
 }
 
 export interface NativeApi {
@@ -494,6 +499,7 @@ export interface NativeApi {
     createAuthPairingToken: (
       input?: AuthCreatePairingCredentialInput,
     ) => Promise<AuthPairingCredentialResult>;
+    createAuthPairingUrl: (input?: { label?: string }) => Promise<{ url: string }>;
     listAuthPairingLinks: () => Promise<ReadonlyArray<AuthPairingLink>>;
     revokeAuthPairingLink: (input: AuthRevokePairingLinkInput) => Promise<{ revoked: boolean }>;
     listAuthClients: () => Promise<ReadonlyArray<AuthClientSession>>;

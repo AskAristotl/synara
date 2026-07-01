@@ -93,6 +93,7 @@ import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsage
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { KeyboardShortcutsSettingsPanel } from "../components/settings/KeyboardShortcutsSettingsPanel";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
+import { DevicesSettingsPanel } from "../components/hosts/DevicesSettingsPanel";
 import {
   CHAT_CONTENT_CARD_CLASS_NAME,
   CHAT_MAIN_VIEWPORT_SHELL_CLASS_NAME,
@@ -3284,6 +3285,8 @@ function SettingsRouteView() {
         return <SkillsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
+      case "devices":
+        return <DevicesSettingsPanel />;
       case "advanced":
         return renderAdvancedPanel();
       default:

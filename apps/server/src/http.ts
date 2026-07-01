@@ -12,6 +12,7 @@ import { EDITOR_ICON_ROUTE_PATH } from "@t3tools/shared/editorIcons";
 import { DateTime, Effect, Exit, FileSystem, Layer, Path, Schema, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
+import { appCorsHeaders } from "./appCors";
 import {
   ATTACHMENTS_ROUTE_PREFIX,
   normalizeAttachmentRelativePath,
@@ -44,6 +45,15 @@ const decodeCreatePairingCredentialInput = Schema.decodeUnknownEffect(
 );
 const decodeRevokePairingLinkInput = Schema.decodeUnknownEffect(AuthRevokePairingLinkInput);
 const decodeRevokeClientSessionInput = Schema.decodeUnknownEffect(AuthRevokeClientSessionInput);
+
+// Content-Type for statically served files. Shared by both static-serving paths
+// (the Effect route and the legacy `serveStaticAsset`) so they cannot drift.
+// `Mime` (mime-db backed) does not reliably map `.webmanifest`, and Chrome
+// rejects a PWA manifest served as octet-stream, so special-case it here.
+function staticContentType(filePath: string): string {
+  if (filePath.endsWith(".webmanifest")) return "application/manifest+json; charset=utf-8";
+  return Mime.getType(filePath) ?? "application/octet-stream";
+}
 
 function resolveEditorIconCacheDir(config: ServerConfigShape): string {
   return nodePath.join(config.stateDir, "app-icons");
@@ -208,171 +218,225 @@ const readEffectJson = (request: HttpServerRequest.HttpServerRequest, message: s
     ),
   );
 
-const authEffectRouteLayer = HttpRouter.add(
-  "*",
-  "/api/auth/*",
-  Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const serverAuth = yield* ServerAuth;
-    const sessions = yield* SessionCredentialService;
-    const url = HttpServerRequest.toURL(request);
-    if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
-    const authRequest = makeEffectAuthRequest(request);
+// Handles every `/api/auth/*` route once routing/auth context is known. Kept
+// separate from authEffectRouteLayer so CORS headers (computed before the
+// auth services are even reached) can be applied uniformly to every branch
+// below, including the trailing error handler.
+const authRouteEffect = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const serverAuth = yield* ServerAuth;
+  const sessions = yield* SessionCredentialService;
+  const url = HttpServerRequest.toURL(request);
+  if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
+  const authRequest = makeEffectAuthRequest(request);
 
-    if (request.method === "GET" && url.pathname === "/api/auth/session") {
-      return HttpServerResponse.jsonUnsafe(yield* serverAuth.getSessionState(authRequest));
-    }
+  if (request.method === "GET" && url.pathname === "/api/auth/session") {
+    return HttpServerResponse.jsonUnsafe(yield* serverAuth.getSessionState(authRequest));
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/bootstrap") {
-      const payload = yield* readEffectJson(request, "Invalid bootstrap payload.").pipe(
-        Effect.flatMap(decodeBootstrapInput),
-        Effect.mapError((cause) => ({
-          message: "Invalid bootstrap payload.",
-          status: 400 as const,
-          cause,
-        })),
-      );
-      const result = yield* serverAuth.exchangeBootstrapCredential(payload.credential, {
+  if (request.method === "POST" && url.pathname === "/api/auth/bootstrap") {
+    const payload = yield* readEffectJson(request, "Invalid bootstrap payload.").pipe(
+      Effect.flatMap(decodeBootstrapInput),
+      Effect.mapError((cause) => ({
+        message: "Invalid bootstrap payload.",
+        status: 400 as const,
+        cause,
+      })),
+    );
+    const result = yield* serverAuth.exchangeBootstrapCredential(payload.credential, {
+      ...deriveAuthClientMetadata({
+        headers: request.headers,
+        remoteAddress: request.remoteAddress ?? null,
+      }),
+    });
+    return HttpServerResponse.jsonUnsafe(result.response, {
+      headers: {
+        "Set-Cookie": encodeCookie({
+          name: sessions.cookieName,
+          value: result.sessionToken,
+          expiresAt: result.response.expiresAt,
+        }),
+      },
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/bootstrap/bearer") {
+    const payload = yield* readEffectJson(request, "Invalid bootstrap payload.").pipe(
+      Effect.flatMap(decodeBootstrapInput),
+      Effect.mapError((cause) => ({
+        message: "Invalid bootstrap payload.",
+        status: 400 as const,
+        cause,
+      })),
+    );
+    return HttpServerResponse.jsonUnsafe(
+      yield* serverAuth.exchangeBootstrapCredentialForBearerSession(payload.credential, {
         ...deriveAuthClientMetadata({
           headers: request.headers,
           remoteAddress: request.remoteAddress ?? null,
         }),
-      });
-      return HttpServerResponse.jsonUnsafe(result.response, {
-        headers: {
-          "Set-Cookie": encodeCookie({
-            name: sessions.cookieName,
-            value: result.sessionToken,
-            expiresAt: result.response.expiresAt,
-          }),
-        },
-      });
-    }
+      }),
+    );
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/bootstrap/bearer") {
-      const payload = yield* readEffectJson(request, "Invalid bootstrap payload.").pipe(
-        Effect.flatMap(decodeBootstrapInput),
-        Effect.mapError((cause) => ({
-          message: "Invalid bootstrap payload.",
-          status: 400 as const,
-          cause,
-        })),
-      );
+  if (request.method === "POST" && url.pathname === "/api/auth/ws-token") {
+    const session = yield* serverAuth.authenticateHttpRequest(authRequest);
+    return HttpServerResponse.jsonUnsafe(yield* serverAuth.issueWebSocketToken(session));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/pairing-token") {
+    const session = yield* serverAuth.authenticateHttpRequest(authRequest);
+    if (session.role !== "owner")
       return HttpServerResponse.jsonUnsafe(
-        yield* serverAuth.exchangeBootstrapCredentialForBearerSession(payload.credential, {
-          ...deriveAuthClientMetadata({
-            headers: request.headers,
-            remoteAddress: request.remoteAddress ?? null,
-          }),
-        }),
+        { error: "Only owner sessions can create pairing credentials." },
+        { status: 403 },
       );
-    }
+    const payload =
+      Number(request.headers["content-length"] ?? "0") > 0
+        ? yield* readEffectJson(request, "Invalid pairing credential payload.").pipe(
+            Effect.flatMap(decodeCreatePairingCredentialInput),
+            Effect.mapError((cause) => ({
+              message: "Invalid pairing credential payload.",
+              status: 400 as const,
+              cause,
+            })),
+          )
+        : {};
+    return HttpServerResponse.jsonUnsafe(yield* serverAuth.issuePairingCredential(payload));
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/ws-token") {
-      const session = yield* serverAuth.authenticateHttpRequest(authRequest);
-      return HttpServerResponse.jsonUnsafe(yield* serverAuth.issueWebSocketToken(session));
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/auth/pairing-token") {
-      const session = yield* serverAuth.authenticateHttpRequest(authRequest);
-      if (session.role !== "owner")
-        return HttpServerResponse.jsonUnsafe(
-          { error: "Only owner sessions can create pairing credentials." },
-          { status: 403 },
-        );
-      const payload =
-        Number(request.headers["content-length"] ?? "0") > 0
-          ? yield* readEffectJson(request, "Invalid pairing credential payload.").pipe(
-              Effect.flatMap(decodeCreatePairingCredentialInput),
-              Effect.mapError((cause) => ({
-                message: "Invalid pairing credential payload.",
-                status: 400 as const,
-                cause,
-              })),
-            )
-          : {};
-      return HttpServerResponse.jsonUnsafe(yield* serverAuth.issuePairingCredential(payload));
-    }
-
-    const ownerSession = Effect.gen(function* () {
-      const session = yield* serverAuth.authenticateHttpRequest(authRequest);
-      if (session.role !== "owner") {
-        return yield* Effect.fail({
-          message: "Only owner sessions can manage network access.",
-          status: 403 as const,
-        });
-      }
-      return session;
+  if (request.method === "POST" && url.pathname === "/api/auth/pairing-url") {
+    const session = yield* serverAuth.authenticateHttpRequest(authRequest);
+    if (session.role !== "owner")
+      return HttpServerResponse.jsonUnsafe(
+        { error: "Only owner sessions can create pairing links." },
+        { status: 403 },
+      );
+    const payload =
+      Number(request.headers["content-length"] ?? "0") > 0
+        ? yield* readEffectJson(request, "Invalid pairing url payload.").pipe(
+            Effect.flatMap(decodeCreatePairingCredentialInput),
+            Effect.mapError((cause) => ({
+              message: "Invalid pairing url payload.",
+              status: 400 as const,
+              cause,
+            })),
+          )
+        : {};
+    const baseUrl = `${url.protocol}//${url.host}`;
+    return HttpServerResponse.jsonUnsafe({
+      url: yield* serverAuth.issueClientPairingUrl(baseUrl, payload),
     });
+  }
 
-    if (request.method === "GET" && url.pathname === "/api/auth/pairing-links") {
-      yield* ownerSession;
-      return HttpServerResponse.jsonUnsafe(yield* serverAuth.listPairingLinks());
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/auth/pairing-links/revoke") {
-      yield* ownerSession;
-      const payload = yield* readEffectJson(request, "Invalid revoke pairing link payload.").pipe(
-        Effect.flatMap(decodeRevokePairingLinkInput),
-        Effect.mapError((cause) => ({
-          message: "Invalid revoke pairing link payload.",
-          status: 400 as const,
-          cause,
-        })),
-      );
-      return HttpServerResponse.jsonUnsafe({
-        revoked: yield* serverAuth.revokePairingLink(payload.id),
+  const ownerSession = Effect.gen(function* () {
+    const session = yield* serverAuth.authenticateHttpRequest(authRequest);
+    if (session.role !== "owner") {
+      return yield* Effect.fail({
+        message: "Only owner sessions can manage network access.",
+        status: 403 as const,
       });
     }
+    return session;
+  });
 
-    if (request.method === "GET" && url.pathname === "/api/auth/clients") {
-      const session = yield* ownerSession;
-      return HttpServerResponse.jsonUnsafe(yield* serverAuth.listClientSessions(session.sessionId));
-    }
+  if (request.method === "GET" && url.pathname === "/api/auth/pairing-links") {
+    yield* ownerSession;
+    return HttpServerResponse.jsonUnsafe(yield* serverAuth.listPairingLinks());
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/clients/revoke") {
-      const session = yield* ownerSession;
-      const payload = yield* readEffectJson(request, "Invalid revoke client payload.").pipe(
-        Effect.flatMap(decodeRevokeClientSessionInput),
-        Effect.mapError((cause) => ({
-          message: "Invalid revoke client payload.",
-          status: 400 as const,
-          cause,
-        })),
-      );
-      return HttpServerResponse.jsonUnsafe({
-        revoked: yield* serverAuth.revokeClientSession(session.sessionId, payload.sessionId),
-      });
-    }
+  if (request.method === "POST" && url.pathname === "/api/auth/pairing-links/revoke") {
+    yield* ownerSession;
+    const payload = yield* readEffectJson(request, "Invalid revoke pairing link payload.").pipe(
+      Effect.flatMap(decodeRevokePairingLinkInput),
+      Effect.mapError((cause) => ({
+        message: "Invalid revoke pairing link payload.",
+        status: 400 as const,
+        cause,
+      })),
+    );
+    return HttpServerResponse.jsonUnsafe({
+      revoked: yield* serverAuth.revokePairingLink(payload.id),
+    });
+  }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/clients/revoke-others") {
-      const session = yield* ownerSession;
-      return HttpServerResponse.jsonUnsafe({
-        revokedCount: yield* serverAuth.revokeOtherClientSessions(session.sessionId),
-      });
-    }
+  if (request.method === "GET" && url.pathname === "/api/auth/clients") {
+    const session = yield* ownerSession;
+    return HttpServerResponse.jsonUnsafe(yield* serverAuth.listClientSessions(session.sessionId));
+  }
 
-    return HttpServerResponse.text("Not Found", { status: 404 });
-  }).pipe(
-    Effect.catch((error) =>
-      Effect.succeed(
-        HttpServerResponse.jsonUnsafe(
-          {
-            error:
-              error instanceof Error
-                ? error.message
-                : String((error as { message?: unknown }).message ?? error),
-          },
-          {
-            status:
-              typeof (error as { status?: unknown }).status === "number"
-                ? (error as { status: number }).status
-                : 500,
-          },
-        ),
+  if (request.method === "POST" && url.pathname === "/api/auth/clients/revoke") {
+    const session = yield* ownerSession;
+    const payload = yield* readEffectJson(request, "Invalid revoke client payload.").pipe(
+      Effect.flatMap(decodeRevokeClientSessionInput),
+      Effect.mapError((cause) => ({
+        message: "Invalid revoke client payload.",
+        status: 400 as const,
+        cause,
+      })),
+    );
+    return HttpServerResponse.jsonUnsafe({
+      revoked: yield* serverAuth.revokeClientSession(session.sessionId, payload.sessionId),
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/auth/clients/revoke-others") {
+    const session = yield* ownerSession;
+    return HttpServerResponse.jsonUnsafe({
+      revokedCount: yield* serverAuth.revokeOtherClientSessions(session.sessionId),
+    });
+  }
+
+  return HttpServerResponse.text("Not Found", { status: 404 });
+}).pipe(
+  Effect.catch((error) =>
+    Effect.succeed(
+      HttpServerResponse.jsonUnsafe(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : String((error as { message?: unknown }).message ?? error),
+        },
+        {
+          status:
+            typeof (error as { status?: unknown }).status === "number"
+              ? (error as { status: number }).status
+              : 500,
+        },
       ),
     ),
   ),
+);
+
+// Every `/api/auth/*` response must carry CORS headers for trusted
+// cross-origin callers (e.g. the desktop app at t3://app reaching a remote
+// host), and OPTIONS preflight must short-circuit before any auth logic
+// runs. Computed here, outside authRouteEffect, so it covers all branches
+// uniformly, including the AuthError/error catch handler. The `!url` guard
+// runs first so an unparseable request URL still gets the prior 400 Bad
+// Request behavior, even for OPTIONS.
+export const authEffectRouteLayer = HttpRouter.add(
+  "*",
+  "/api/auth/*",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const config = yield* ServerConfig;
+    const url = HttpServerRequest.toURL(request);
+    if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
+    const cors = appCorsHeaders({
+      rawOrigin: request.headers.origin,
+      requestOrigin: url.origin,
+      config,
+    });
+
+    if (request.method === "OPTIONS") {
+      return HttpServerResponse.empty({ status: 204, headers: cors });
+    }
+
+    const response = yield* authRouteEffect;
+    return HttpServerResponse.setHeaders(response, cors);
+  }),
 );
 
 const projectFaviconEffectRouteLayer = HttpRouter.add(
@@ -669,7 +733,7 @@ const staticAndDevEffectRouteLayer = HttpRouter.add(
     if (!data) return HttpServerResponse.text("Internal Server Error", { status: 500 });
     return HttpServerResponse.uint8Array(data, {
       status: 200,
-      contentType: Mime.getType(filePath) ?? "application/octet-stream",
+      contentType: staticContentType(filePath),
     });
   }),
 );
@@ -768,6 +832,7 @@ export function createHttpRequestHandler({
             respond,
             serverAuth,
             sessionCredentials,
+            config: serverConfig,
           });
           if (handled) return;
         }
@@ -1004,7 +1069,7 @@ const serveStaticAsset = Effect.fn(function* (input: {
     return;
   }
 
-  const contentType = Mime.getType(filePath) ?? "application/octet-stream";
+  const contentType = staticContentType(filePath);
   const data = yield* input.fileSystem
     .readFile(filePath)
     .pipe(Effect.catch(() => Effect.succeed(null)));

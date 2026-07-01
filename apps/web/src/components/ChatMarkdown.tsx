@@ -39,6 +39,7 @@ import { openWorkspaceFileReference, useWorkspaceFileOpener } from "../lib/works
 import { resolveMarkdownFileLinkTarget, rewriteMarkdownFileUriHref } from "../markdown-links";
 import type { ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { GeneratedMarkdownImage } from "./chat/GeneratedMarkdownImage";
+import MermaidDiagram from "./chat/MermaidDiagram";
 import {
   COMPOSER_INLINE_CHIP_ICON_LABEL_GAP_CLASS_NAME,
   COMPOSER_INLINE_CHIP_TOKEN_ICON_CLASS_NAME,
@@ -46,6 +47,7 @@ import {
 import { LinkChipIcon } from "./LinkChipIcon";
 import { InlineMentionChip } from "./chat/InlineMentionChip";
 import { IconButton } from "./ui/icon-button";
+import { CodeHighlightErrorBoundary } from "./chat/CodeHighlightErrorBoundary";
 
 const EXTERNAL_HTTP_HREF_PATTERN = /^https?:\/\//i;
 // Trailing `:line` / `:line:col` position suffix on a resolved file link. Kept on
@@ -57,27 +59,6 @@ const MARKDOWN_EXTERNAL_LINK_ICON_CLASS_NAME = `${COMPOSER_INLINE_CHIP_TOKEN_ICO
 
 function isExternalHttpHref(href: string | undefined): href is string {
   return typeof href === "string" && EXTERNAL_HTTP_HREF_PATTERN.test(href);
-}
-
-class CodeHighlightErrorBoundary extends React.Component<
-  { fallback: ReactNode; children: ReactNode },
-  { hasError: boolean }
-> {
-  constructor(props: { fallback: ReactNode; children: ReactNode }) {
-    super(props);
-    this.state = { hasError: false };
-  }
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  override render() {
-    if (this.state.hasError) {
-      return this.props.fallback;
-    }
-    return this.props.children;
-  }
 }
 
 interface ChatMarkdownProps {
@@ -1034,7 +1015,7 @@ function ChatMarkdown({
         const fence = parseCodeFenceInfo(extractRawFenceInfo(codeBlock.className));
         const code = dedentCode(codeBlock.code);
 
-        return (
+        const shikiCodeBlock = (
           <MarkdownCodeBlock code={code} fence={fence}>
             <CodeHighlightErrorBoundary fallback={<pre {...props}>{children}</pre>}>
               <Suspense fallback={<pre {...props}>{children}</pre>}>
@@ -1048,6 +1029,20 @@ function ChatMarkdown({
             </CodeHighlightErrorBoundary>
           </MarkdownCodeBlock>
         );
+
+        if (fence.language === "mermaid") {
+          return (
+            <MermaidDiagram
+              code={code}
+              resolvedTheme={resolvedTheme}
+              isStreaming={isStreaming}
+              onImageExpand={onImageExpand}
+              sourceFallback={shikiCodeBlock}
+            />
+          );
+        }
+
+        return shikiCodeBlock;
       },
       code({ node: _node, className, children, ...props }) {
         // Fenced blocks carry a `language-*` class and are rendered by `pre`;
