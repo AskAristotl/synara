@@ -903,6 +903,123 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         ),
       );
 
+    // `snapshotWorkingTree` (sub-agent `includeWip`, decision 10): captures
+    // staged + unstaged + untracked changes into a dangling commit WITHOUT
+    // touching the repo's real index, working tree, or stash. Reuses the
+    // same throwaway-index technique as `readMoveAwareWorkingTreeSummary`
+    // above (copy the real index into a scoped temp file, point
+    // `GIT_INDEX_FILE` at the copy, `git add -A` into that copy only) so a
+    // sub-agent worktree can branch from a commit containing the parent's
+    // dirty tree while the parent is left completely untouched. Unlike
+    // `readMoveAwareWorkingTreeSummary`, failures here propagate as
+    // `GitCommandError` instead of being swallowed to `null` -- `null` is a
+    // meaningful "nothing to snapshot" result and must not be conflated with
+    // an infra failure.
+    const snapshotWorkingTree: GitCoreShape["snapshotWorkingTree"] = (input) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { cwd } = input;
+
+          // A repo with no commits yet has no HEAD to layer a snapshot
+          // commit onto (commit-tree needs a parent) -- nothing meaningful
+          // to snapshot in that case either.
+          const headResult = yield* executeGit(
+            "GitCore.snapshotWorkingTree.head",
+            cwd,
+            ["rev-parse", "--verify", "HEAD"],
+            { allowNonZeroExit: true, timeoutMs: 10_000 },
+          );
+          if (headResult.code !== 0) {
+            return null;
+          }
+          const head = headResult.stdout.trim();
+
+          const indexPathRaw = yield* runGitStdout("GitCore.snapshotWorkingTree.indexPath", cwd, [
+            "rev-parse",
+            "--git-path",
+            "index",
+          ]).pipe(Effect.map((stdout) => stdout.trim()));
+
+          const tempIndexDir = yield* fileSystem
+            .makeTempDirectoryScoped({
+              prefix: `t3code-git-wip-snapshot-${process.pid}-`,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                createGitCommandError(
+                  "GitCore.snapshotWorkingTree.tempIndexDir",
+                  cwd,
+                  ["<make temp index dir>"],
+                  "failed to create a throwaway temp directory for the snapshot index.",
+                  cause,
+                ),
+              ),
+            );
+          const tempIndexPath = nodePath.join(tempIndexDir, "index");
+          if (indexPathRaw.length > 0) {
+            yield* Effect.tryPromise(() =>
+              nodeFs.copyFile(resolveGitPath(cwd, indexPathRaw), tempIndexPath),
+            ).pipe(
+              Effect.catch((cause) =>
+                hasNodeErrorCode(cause, "ENOENT")
+                  ? Effect.void
+                  : Effect.fail(
+                      createGitCommandError(
+                        "GitCore.snapshotWorkingTree.copyIndex",
+                        cwd,
+                        ["<copy index>"],
+                        "failed to copy the repository index into a throwaway snapshot index.",
+                        cause,
+                      ),
+                    ),
+              ),
+            );
+          }
+
+          const tempIndexEnv = { GIT_INDEX_FILE: tempIndexPath };
+
+          // Stage tracked + untracked changes (respecting .gitignore) into
+          // the throwaway index only -- the repo's real index is never
+          // written to.
+          yield* executeGit("GitCore.snapshotWorkingTree.addAll", cwd, ["add", "-A", "--", ":/"], {
+            env: tempIndexEnv,
+            timeoutMs: MOVE_AWARE_WORKING_TREE_STATUS_TIMEOUT_MS,
+            fallbackErrorMessage: "git add -A failed while snapshotting the working tree",
+          });
+
+          const tree = yield* executeGit(
+            "GitCore.snapshotWorkingTree.writeTree",
+            cwd,
+            ["write-tree"],
+            {
+              env: tempIndexEnv,
+              fallbackErrorMessage: "git write-tree failed while snapshotting the working tree",
+            },
+          ).pipe(Effect.map((result) => result.stdout.trim()));
+
+          const headTree = yield* runGitStdout("GitCore.snapshotWorkingTree.headTree", cwd, [
+            "rev-parse",
+            `${head}^{tree}`,
+          ]).pipe(Effect.map((stdout) => stdout.trim()));
+
+          if (tree === headTree) {
+            // Working tree matches HEAD exactly -- clean, nothing to snapshot.
+            return null;
+          }
+
+          const commit = yield* runGitStdout("GitCore.snapshotWorkingTree.commitTree", cwd, [
+            "commit-tree",
+            tree,
+            "-p",
+            head,
+            "-m",
+            "subagent wip snapshot",
+          ]).pipe(Effect.map((stdout) => stdout.trim()));
+
+          return { commit };
+        }),
+      );
+
     const listStashEntries = (
       operation: string,
       cwd: string,
@@ -2638,6 +2755,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
       readConfigValue,
       listBranches,
       createWorktree,
+      snapshotWorkingTree,
       createDetachedWorktree,
       fetchPullRequestBranch,
       ensureRemote,

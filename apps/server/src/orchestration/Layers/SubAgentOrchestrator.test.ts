@@ -373,18 +373,30 @@ function createDiscoveryStub(available: boolean): ProviderDiscoveryServiceShape 
 }
 
 /**
- * A fake GitCore for the `workspace:"worktree"` spawn path (Task 4.1). Only
- * `createWorktree` is meaningful -- it records every input and, absent a
- * configured `failure`, returns a canned successful result; the rest are
- * inert. Mirrors the partial-cast fake `gitCore` in
- * `automation/Layers/AutomationService.test.ts` (the primary template for
- * this task's worktree provisioning).
+ * A fake GitCore for the `workspace:"worktree"` spawn path (Task 4.1/4.2).
+ * `createWorktree` records every input and, absent a configured `failure`,
+ * returns a canned successful result. `snapshotWorkingTree` (Task 4.2,
+ * `includeWip`) records every `{ cwd }` it's called with and, absent a
+ * configured `snapshotFailure`, resolves to `snapshotResult` (defaulting to
+ * `null`, i.e. "clean tree, nothing to snapshot" -- a test that cares about
+ * the snapshot's effect on the worktree base ref passes an explicit
+ * `snapshotResult`). The rest are inert. Mirrors the partial-cast fake
+ * `gitCore` in `automation/Layers/AutomationService.test.ts` (the primary
+ * template for this task's worktree provisioning).
  */
-function createGitCoreStub(options: { readonly failure?: GitCommandError } = {}): {
+function createGitCoreStub(
+  options: {
+    readonly failure?: GitCommandError;
+    readonly snapshotResult?: { readonly commit: string } | null;
+    readonly snapshotFailure?: GitCommandError;
+  } = {},
+): {
   readonly gitCore: GitCoreShape;
   readonly calls: GitCreateWorktreeInput[];
+  readonly snapshotCalls: { readonly cwd: string }[];
 } {
   const calls: GitCreateWorktreeInput[] = [];
+  const snapshotCalls: { readonly cwd: string }[] = [];
   const createWorktree = (input: GitCreateWorktreeInput) =>
     Effect.sync(() => {
       calls.push(input);
@@ -400,8 +412,18 @@ function createGitCoreStub(options: { readonly failure?: GitCommandError } = {})
             }),
       ),
     );
-  const gitCore = { createWorktree } as unknown as GitCoreShape;
-  return { gitCore, calls };
+  const snapshotWorkingTree = (input: { readonly cwd: string }) =>
+    Effect.sync(() => {
+      snapshotCalls.push(input);
+    }).pipe(
+      Effect.flatMap(() =>
+        options.snapshotFailure
+          ? Effect.fail(options.snapshotFailure)
+          : Effect.succeed(options.snapshotResult ?? null),
+      ),
+    );
+  const gitCore = { createWorktree, snapshotWorkingTree } as unknown as GitCoreShape;
+  return { gitCore, calls, snapshotCalls };
 }
 
 function buildHarness(input: {
@@ -735,6 +757,177 @@ describe("SubAgentOrchestrator.spawn (workspace:'worktree', Task 4.1)", () => {
 
       expect(error).toBeInstanceOf(SubAgentError);
       expect(error.reason).toBe("worktree-failed");
+      expect(calls).toHaveLength(0);
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.spawn (workspace:'worktree', includeWip, Task 4.2)", () => {
+  it("branches the worktree from the WIP snapshot's commit (not HEAD) when includeWip:true and the parent tree is dirty", async () => {
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({
+      snapshotResult: { commit: "wip-sha" },
+    });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime, commands } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+      includeWip: true,
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(snapshotCalls).toEqual([{ cwd: project.workspaceRoot }]);
+      expect(calls).toHaveLength(1);
+      // The worktree base ref is the snapshot commit, not "HEAD".
+      expect(calls[0]?.branch).toBe("wip-sha");
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.envMode).toBe("worktree");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("falls back to HEAD when includeWip:true but the parent tree is clean (snapshot returns null)", async () => {
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({ snapshotResult: null });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+      includeWip: true,
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      // The snapshot primitive was still invoked (a clean tree is only known
+      // AFTER calling it)...
+      expect(snapshotCalls).toEqual([{ cwd: project.workspaceRoot }]);
+      // ...but a null result (nothing to snapshot) falls back to HEAD.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.branch).toBe("HEAD");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("does not call snapshotWorkingTree and bases the worktree on HEAD when includeWip is false", async () => {
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({
+      snapshotResult: { commit: "wip-sha" },
+    });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+      includeWip: false,
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(snapshotCalls).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.branch).toBe("HEAD");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("does not call snapshotWorkingTree and bases the worktree on HEAD when includeWip is omitted (defaults to false)", async () => {
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({
+      snapshotResult: { commit: "wip-sha" },
+    });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(snapshotCalls).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.branch).toBe("HEAD");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("ignores includeWip:true for workspace:'share' (no worktree, no snapshot)", async () => {
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({
+      snapshotResult: { commit: "wip-sha" },
+    });
+    const { runtime, commands } = buildHarness({ available: true, gitCore });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+      includeWip: true,
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(snapshotCalls).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+      expect(commands).toHaveLength(2);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with worktree-failed and dispatches no thread.create when the WIP snapshot fails", async () => {
+    const snapshotFailure = new GitCommandError({
+      operation: "GitCore.snapshotWorkingTree.addAll",
+      command: "git add -A",
+      cwd: "/repo/root",
+      detail: "boom",
+    });
+    const { gitCore, calls, snapshotCalls } = createGitCoreStub({ snapshotFailure });
+    const caller = makeCaller();
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    const { runtime, commands } = buildHarness({ available: true, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+      includeWip: true,
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("worktree-failed");
+      expect(snapshotCalls).toEqual([{ cwd: project.workspaceRoot }]);
+      // createWorktree must never be reached once the snapshot step fails.
       expect(calls).toHaveLength(0);
       expect(commands).toHaveLength(0);
     } finally {

@@ -42,9 +42,10 @@ import type { Effect } from "effect";
  * backing thread (no envelope can be built without a provider); `"wait-failed"`
  * covers an infra read failure while collecting child state. `"worktree-failed"`
  * covers a `workspace:"worktree"` spawn (Task 4.1) that could not resolve the
- * parent project's repo root or provision the isolated Git worktree — `spawn`
- * fails before dispatching any command, so no half-created thread is left
- * behind.
+ * parent project's repo root or provision the isolated Git worktree, or (Task
+ * 4.2) that could not snapshot the parent's uncommitted changes for
+ * `includeWip` — `spawn` fails before dispatching any command, so no
+ * half-created thread is left behind.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",

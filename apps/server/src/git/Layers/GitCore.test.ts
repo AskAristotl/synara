@@ -1296,6 +1296,100 @@ it.layer(TestLayer)("git integration", (it) => {
     );
   });
 
+  // ── snapshotWorkingTree (sub-agent includeWip, Task 4.2) ──
+
+  describe("snapshotWorkingTree", () => {
+    it.effect("returns null when the working tree is clean", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+
+        const result = yield* (yield* GitCore).snapshotWorkingTree({ cwd: tmp });
+        expect(result).toBeNull();
+      }),
+    );
+
+    it.effect(
+      "captures unstaged tracked changes and untracked files into a dangling commit without touching the parent's working tree/index/stash",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+
+          const headBefore = yield* git(tmp, ["rev-parse", "HEAD"]);
+
+          // Dirty the parent: modify a tracked file (unstaged) and add an
+          // untracked file. Neither is staged or committed.
+          yield* writeTextFile(path.join(tmp, "README.md"), "# test\nmodified by sub-agent\n");
+          yield* writeTextFile(path.join(tmp, "untracked.txt"), "brand new file\n");
+
+          const statusBeforeSnapshot = yield* git(tmp, ["status", "--porcelain"]);
+          expect(statusBeforeSnapshot.length).toBeGreaterThan(0);
+
+          const result = yield* (yield* GitCore).snapshotWorkingTree({ cwd: tmp });
+          expect(result).not.toBeNull();
+          const commit = result?.commit ?? "";
+          expect(commit).toMatch(/^[0-9a-f]{40}$/);
+
+          // (a) The snapshot commit's tree contains the uncommitted change...
+          const trackedAtSnapshot = yield* git(tmp, ["show", `${commit}:README.md`]);
+          expect(trackedAtSnapshot).toBe("# test\nmodified by sub-agent");
+          // ...and the untracked file too (temp-index approach captures both).
+          const untrackedAtSnapshot = yield* git(tmp, ["show", `${commit}:untracked.txt`]);
+          expect(untrackedAtSnapshot).toBe("brand new file");
+
+          // The snapshot commit's parent is the pre-snapshot HEAD.
+          const snapshotParent = yield* git(tmp, ["rev-parse", `${commit}^`]);
+          expect(snapshotParent).toBe(headBefore);
+
+          // (b) The parent repo is completely unaffected by taking the
+          // snapshot: identical porcelain status, HEAD unchanged, no stash
+          // entry leaked.
+          const statusAfterSnapshot = yield* git(tmp, ["status", "--porcelain"]);
+          expect(statusAfterSnapshot).toBe(statusBeforeSnapshot);
+          const headAfter = yield* git(tmp, ["rev-parse", "HEAD"]);
+          expect(headAfter).toBe(headBefore);
+          const stashList = yield* git(tmp, ["stash", "list"]);
+          expect(stashList).toBe("");
+
+          // The working tree files themselves are untouched (still hold the
+          // uncommitted edits verbatim, not e.g. reset/checked-out).
+          const readmeOnDisk = yield* readTextFile(path.join(tmp, "README.md"));
+          expect(readmeOnDisk).toBe("# test\nmodified by sub-agent\n");
+          const untrackedOnDisk = yield* readTextFile(path.join(tmp, "untracked.txt"));
+          expect(untrackedOnDisk).toBe("brand new file\n");
+        }),
+    );
+
+    it.effect(
+      "captures staged tracked changes into the snapshot without touching the real index",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+
+          yield* writeTextFile(path.join(tmp, "README.md"), "# test\nstaged change\n");
+          yield* git(tmp, ["add", "README.md"]);
+
+          const stagedContentBefore = yield* git(tmp, ["show", ":README.md"]);
+          const statusBeforeSnapshot = yield* git(tmp, ["status", "--porcelain"]);
+
+          const result = yield* (yield* GitCore).snapshotWorkingTree({ cwd: tmp });
+          expect(result).not.toBeNull();
+          const commit = result?.commit ?? "";
+
+          const trackedAtSnapshot = yield* git(tmp, ["show", `${commit}:README.md`]);
+          expect(trackedAtSnapshot).toBe("# test\nstaged change");
+
+          // The real index (staged content) is unchanged by taking the snapshot.
+          const stagedContentAfter = yield* git(tmp, ["show", ":README.md"]);
+          expect(stagedContentAfter).toBe(stagedContentBefore);
+          const statusAfterSnapshot = yield* git(tmp, ["status", "--porcelain"]);
+          expect(statusAfterSnapshot).toBe(statusBeforeSnapshot);
+        }),
+    );
+  });
+
   // ── Full flow: local branch checkout ──
 
   describe("full flow: local branch checkout", () => {

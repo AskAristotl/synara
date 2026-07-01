@@ -60,6 +60,14 @@ export interface GitPreparedCommitContext {
   stagedPatch: string;
 }
 
+export interface GitSnapshotWorkingTreeInput {
+  readonly cwd: string;
+}
+
+export interface GitSnapshotWorkingTreeResult {
+  readonly commit: string;
+}
+
 export interface ExecuteGitProgress {
   readonly onStdoutLine?: (line: string) => Effect.Effect<void, never>;
   readonly onStderrLine?: (line: string) => Effect.Effect<void, never>;
@@ -254,6 +262,21 @@ export interface GitCoreShape {
   readonly createWorktree: (
     input: GitCreateWorktreeInput,
   ) => Effect.Effect<GitCreateWorktreeResult, GitCommandError>;
+
+  /**
+   * Snapshot the working tree's current uncommitted changes (staged +
+   * unstaged + untracked, respecting `.gitignore`) into a dangling commit on
+   * top of HEAD, entirely via a THROWAWAY copy of the index (`GIT_INDEX_FILE`
+   * pointed at a temp file) -- the repository's real index, working tree, and
+   * stash are never written to. Returns `null` when the working tree is
+   * clean (nothing to snapshot) or HEAD cannot be resolved (repo has no
+   * commits yet). Used by sub-agent `includeWip` (decision 10) to branch an
+   * isolated worktree off of a commit that contains the parent's dirty tree
+   * without disturbing the parent.
+   */
+  readonly snapshotWorkingTree: (
+    input: GitSnapshotWorkingTreeInput,
+  ) => Effect.Effect<GitSnapshotWorkingTreeResult | null, GitCommandError>;
 
   /**
    * Create a detached worktree from a branch or ref.

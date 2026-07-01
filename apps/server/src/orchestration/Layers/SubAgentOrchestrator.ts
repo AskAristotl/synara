@@ -16,8 +16,12 @@
  * - `"worktree"` (Task 4.1) provisions a REAL isolated Git worktree via
  *   {@link GitCore}.createWorktree, branching from the parent project's
  *   current HEAD (decision 10). See {@link resolveWorktreeWorkspace}.
- *   `includeWip` (snapshotting the parent's dirty tree onto the child branch)
- *   is Task 4.2 and is not yet implemented.
+ *   `input.includeWip` (Task 4.2) snapshots the parent's uncommitted changes
+ *   onto that branch instead: {@link GitCore}.snapshotWorkingTree produces a
+ *   dangling commit containing the parent's dirty tree WITHOUT touching the
+ *   parent's real working tree/index/stash, and the worktree branches from
+ *   that commit rather than bare HEAD. `includeWip` only applies to
+ *   `"worktree"` -- it is ignored for `"share"`.
  *
  * @module SubAgentOrchestratorLive
  */
@@ -286,14 +290,17 @@ export const SubAgentOrchestratorLive = Layer.effect(
     // spawn (Task 4.1): resolve the parent PROJECT's repo root (not the
     // caller's own, possibly-already-isolated, workspace) via
     // ProjectionSnapshotQuery, then branch a new worktree off of that repo's
-    // current HEAD (decision 10; `includeWip` snapshotting lands in
-    // Task 4.2). Any failure here — the project can't be resolved, or `git
-    // worktree add` itself fails — surfaces as SubAgentError reason
+    // current HEAD (decision 10) -- or, when `includeWip` is requested
+    // (Task 4.2), off of a dangling commit that snapshots the parent's
+    // uncommitted changes onto that same HEAD (see `base` below). Any
+    // failure here — the project can't be resolved, the WIP snapshot fails,
+    // or `git worktree add` itself fails — surfaces as SubAgentError reason
     // "worktree-failed" and is thrown BEFORE `spawn` dispatches anything, so
     // a failed provisioning never leaves a half-created child thread behind.
     const resolveWorktreeWorkspace = (
       caller: SubAgentSpawnCaller,
       childThreadId: ThreadId,
+      includeWip: boolean,
     ): Effect.Effect<SubAgentWorkspaceEnvironment, SubAgentError> =>
       Effect.gen(function* () {
         const projectOption = yield* projection.getProjectShellById(caller.projectId).pipe(
@@ -315,11 +322,32 @@ export const SubAgentOrchestratorLive = Layer.effect(
           );
         }
         const project = projectOption.value;
+
+        // `includeWip`: snapshot the parent's uncommitted changes (staged +
+        // unstaged + untracked) into a dangling commit via
+        // GitCore.snapshotWorkingTree -- entirely read-only w.r.t. the
+        // parent's real working tree/index/stash -- and branch the worktree
+        // from that commit instead of bare HEAD. A clean parent tree
+        // (snapshot returns `null`) or `includeWip` not requested both fall
+        // back to `"HEAD"`, i.e. Task 4.1's unchanged behavior.
+        const base = includeWip
+          ? ((yield* git.snapshotWorkingTree({ cwd: project.workspaceRoot }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SubAgentError({
+                    reason: "worktree-failed",
+                    detail: `Failed to snapshot the parent's uncommitted changes for the sub-agent worktree: ${cause.message}`,
+                    cause,
+                  }),
+              ),
+            ))?.commit ?? "HEAD")
+          : "HEAD";
+
         const newBranch = makeSubAgentBranchName(childThreadId);
         const created = yield* git
           .createWorktree({
             cwd: project.workspaceRoot,
-            branch: "HEAD",
+            branch: base,
             newBranch,
             path: null,
           })
@@ -392,7 +420,7 @@ export const SubAgentOrchestratorLive = Layer.effect(
         // leaves a half-created child thread behind.
         const workspace: SubAgentWorkspaceEnvironment =
           input.workspace === "worktree"
-            ? yield* resolveWorktreeWorkspace(caller, childThreadId)
+            ? yield* resolveWorktreeWorkspace(caller, childThreadId, input.includeWip === true)
             : {
                 envMode: caller.workspace.envMode,
                 branch: caller.workspace.branch,
