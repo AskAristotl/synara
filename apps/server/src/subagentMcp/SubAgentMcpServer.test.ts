@@ -104,7 +104,10 @@ interface OrchestratorFake {
     readonly caller: SubAgentSpawnCaller;
     readonly input: SubAgentSpawnInput;
   }>;
-  readonly waitCalls: SubAgentWaitInput[];
+  readonly waitCalls: Array<{
+    readonly caller: SubAgentCaller;
+    readonly input: SubAgentWaitInput;
+  }>;
   readonly sendMessageCalls: Array<{
     readonly caller: SubAgentCaller;
     readonly input: SubAgentSendMessageInput;
@@ -125,15 +128,15 @@ function createOrchestratorFake(
   } = {},
 ): OrchestratorFake {
   const spawnCalls: OrchestratorFake["spawnCalls"] = [];
-  const waitCalls: SubAgentWaitInput[] = [];
+  const waitCalls: OrchestratorFake["waitCalls"] = [];
   const sendMessageCalls: OrchestratorFake["sendMessageCalls"] = [];
   const stopAgentCalls: OrchestratorFake["stopAgentCalls"] = [];
   const spawn: SubAgentOrchestratorShape["spawn"] = (caller, input) => {
     spawnCalls.push({ caller, input });
     return opts.spawnResult ?? Effect.succeed({ agentId: ThreadId.makeUnsafe("child-thread-1") });
   };
-  const wait: SubAgentOrchestratorShape["wait"] = (input) => {
-    waitCalls.push(input);
+  const wait: SubAgentOrchestratorShape["wait"] = (caller, input) => {
+    waitCalls.push({ caller, input });
     return opts.waitResult ?? Effect.succeed([]);
   };
   const sendMessage: SubAgentOrchestratorShape["sendMessage"] = (caller, input) => {
@@ -447,7 +450,7 @@ describe("SubAgentMcpServer", () => {
   });
 
   describe("tools/call wait", () => {
-    it("calls orchestrator.wait and returns the envelopes as JSON text content", async () => {
+    it("calls orchestrator.wait with the caller from the token and returns the envelopes as JSON text content", async () => {
       const projection = createProjectionStub(new Map([[CALLER_THREAD_ID, makeCallerThread()]]));
       const canned: SubAgentResult[] = [
         {
@@ -475,7 +478,9 @@ describe("SubAgentMcpServer", () => {
       );
 
       expect(orchestrator.waitCalls).toHaveLength(1);
-      expect(orchestrator.waitCalls[0]!.agentIds).toEqual(["child-abc"]);
+      const call = orchestrator.waitCalls[0]!;
+      expect(call.caller).toEqual({ threadId: CALLER_THREAD_ID, canSpawn: true });
+      expect(call.input.agentIds).toEqual(["child-abc"]);
       const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
       const toolResult = result.result as ToolCallResultShape;
       expect(toolResult.isError).toBeUndefined();
@@ -507,6 +512,44 @@ describe("SubAgentMcpServer", () => {
       expect(toolResult.content[0]!.text).toContain("unknown-agent");
       expect(toolResult.content[0]!.text).toContain(
         "Check that you passed an agentId returned by spawn_agent.",
+      );
+    });
+
+    // Task 6.3: `wait` is now ownership-checked server-side by
+    // `SubAgentOrchestrator.wait`'s `assertOwnership`, mirroring
+    // `send_message`/`stop_agent`'s existing not-owner tests below. The MCP
+    // layer itself does no ownership logic -- it just threads `caller`
+    // through and maps whatever `SubAgentError` the orchestrator returns, so
+    // this only needs to prove the `not-owner` reason reaches the tool-error
+    // response with its hint, the same as any other `SubAgentError` reason.
+    it("returns a not-owner tool error when orchestrator.wait rejects ownership", async () => {
+      const projection = createProjectionStub(new Map([[CALLER_THREAD_ID, makeCallerThread()]]));
+      const orchestrator = createOrchestratorFake({
+        waitResult: Effect.fail(
+          new SubAgentError({
+            reason: "not-owner",
+            detail: "Sub-agent 'child-abc' is not a child of the calling session.",
+          }),
+        ),
+      });
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 21,
+          method: "tools/call",
+          params: { name: "wait", arguments: { agentIds: ["child-abc"] } },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content[0]!.text).toContain("not-owner");
+      expect(toolResult.content[0]!.text).toContain(
+        "You can only call send_message/stop_agent/wait on agentIds returned by your own spawn_agent calls.",
       );
     });
 

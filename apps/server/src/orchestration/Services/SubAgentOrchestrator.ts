@@ -64,15 +64,19 @@ import type { Effect } from "effect";
  * (`cascadeStopChildren`'s `ProjectionSnapshotQuery.getShellSnapshot` read)
  * -- a per-child dispatch failure inside `stop`/`cascadeStopChildren` still
  * surfaces as `"dispatch-failed"` (the same `toDispatchError` mapping
- * `spawn` uses for its own command dispatches). `"not-owner"` (Task 6.1) is
- * `sendMessage`/`stopAgent`'s governance failure: the target `agentId` either
- * has no backing thread, or its `parentThreadId` does not match the calling
- * session's `threadId` -- see `assertOwnership` in
- * `Layers/SubAgentOrchestrator.ts`, which both methods run FIRST, before any
- * dispatch, so a rejected call has zero side effects. An infra failure while
- * resolving the target for that ownership check also surfaces as
- * `"not-owner"` (fail closed: ownership cannot be confirmed, so the call
- * cannot proceed) rather than introducing a separate reason for it.
+ * `spawn` uses for its own command dispatches). `"not-owner"` (Task 6.1,
+ * extended to `wait` in Task 6.3) is `sendMessage`/`stopAgent`/`wait`'s
+ * governance failure: a target `agentId` either has no backing thread, or
+ * its `parentThreadId` does not match the calling session's `threadId` --
+ * see `assertOwnership` in `Layers/SubAgentOrchestrator.ts`, which all three
+ * methods run FIRST, before any dispatch or subscription, so a rejected call
+ * has zero side effects. An infra failure while resolving the target for
+ * that ownership check also surfaces as `"not-owner"` (fail closed:
+ * ownership cannot be confirmed, so the call cannot proceed) rather than
+ * introducing a separate reason for it. For `wait`, `"unknown-agent"`
+ * remains reachable for the rare case where a target that WAS owned at the
+ * ownership-check instant disappears before the seed/result read moments
+ * later.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
@@ -179,20 +183,35 @@ export interface SubAgentOrchestratorShape {
    * Block until each requested child reaches a terminal state (or the clamped
    * timeout elapses), then return one result envelope per `agentId`.
    *
-   * Subscribes to the orchestration domain-event stream BEFORE snapshotting each
-   * child so a terminal event in the gap is not lost, then resolves a child when
-   * its session reaches a terminal status (`error` → `"failed"`,
-   * `interrupted`/`stopped` → `"interrupted"`, a finished turn → `"completed"`).
-   * `mode: "all"` (default) resolves when every child is terminal; `mode: "any"`
-   * resolves on the first terminal child. Children still running when the timeout
-   * elapses (or when `"any"` resolves early) are returned with `status:
-   * "running"` — a valid, re-waitable result, not an error.
+   * Ownership is enforced FIRST, before any subscription/dispatch (Task 6.3,
+   * `assertOwnership` in `Layers/SubAgentOrchestrator.ts`, the SAME check
+   * `sendMessage`/`stopAgent` use): every `agentId` in `input.agentIds` must
+   * be a thread whose `parentThreadId === caller.threadId`, or the whole
+   * call fails with `SubAgentError` reason `"not-owner"` -- a caller can
+   * only wait on a child it spawned itself, never an arbitrary thread id or
+   * another caller's child. Checked one `agentId` at a time, in order; the
+   * first non-owned (or nonexistent) `agentId` fails the call immediately,
+   * BEFORE the domain-event subscription or seed reads below, so a rejected
+   * call never subscribes to anything and has zero side effects.
    *
-   * Results are returned in the SAME ORDER as `input.agentIds`. An `agentId` with
-   * no backing thread fails the whole call with reason `"unknown-agent"`.
-   * Ownership/authorization checks are a later task and are NOT performed here.
+   * Once ownership is confirmed for every `agentId`, subscribes to the
+   * orchestration domain-event stream BEFORE snapshotting each child so a
+   * terminal event in the gap is not lost, then resolves a child when its
+   * session reaches a terminal status (`error` → `"failed"`,
+   * `interrupted`/`stopped` → `"interrupted"`, a finished turn →
+   * `"completed"`). `mode: "all"` (default) resolves when every child is
+   * terminal; `mode: "any"` resolves on the first terminal child. Children
+   * still running when the timeout elapses (or when `"any"` resolves early)
+   * are returned with `status: "running"` — a valid, re-waitable result, not
+   * an error.
+   *
+   * Results are returned in the SAME ORDER as `input.agentIds`. An `agentId`
+   * that was owned at the ownership-check instant but disappears before the
+   * seed/result read (a narrow race) fails the whole call with reason
+   * `"unknown-agent"`.
    */
   readonly wait: (
+    caller: SubAgentCaller,
     input: SubAgentWaitInput,
   ) => Effect.Effect<readonly SubAgentResult[], SubAgentError>;
 

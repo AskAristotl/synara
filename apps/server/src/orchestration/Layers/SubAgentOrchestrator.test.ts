@@ -43,6 +43,7 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 import {
+  type SubAgentCaller,
   SubAgentError,
   SubAgentOrchestrator,
   type SubAgentSpawnCaller,
@@ -93,14 +94,24 @@ function createProjectionStub(
       threads: shellThreads,
       updatedAt: iso(0),
     }));
-  // Task 6.1: `assertOwnership` (sendMessage/stopAgent) reads a target
-  // sub-agent's shell row by id -- resolved off the SAME `shellThreads` array
-  // the per-root concurrency cap (Task 5.2) already seeds, so a test wires
-  // ownership state the same way it wires live-child state.
+  // Task 6.1 (extended to `wait` in Task 6.3): `assertOwnership`
+  // (sendMessage/stopAgent/wait) reads a target sub-agent's shell row by id.
+  // Checked first against the explicit `shellThreads` array (the per-root
+  // concurrency cap, Task 5.2, already seeds this the same way), and -- if
+  // not found there -- derived from `threads` (`deriveShellFromThread`) so a
+  // harness that only calls `setThread` (e.g. every `wait` test's
+  // `buildWaitHarness`) doesn't ALSO need to separately populate
+  // `shellThreads` just to satisfy the ownership check: the same `threads`
+  // map a test already wires for `getThreadDetailById` is the single source
+  // of truth for both reads.
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.sync(() => {
       const shell = shellThreads.find((thread) => thread.id === threadId);
-      return shell ? Option.some(shell) : Option.none();
+      if (shell) {
+        return Option.some(shell);
+      }
+      const detail = threads.get(threadId);
+      return detail ? Option.some(deriveShellFromThread(detail)) : Option.none();
     });
   return {
     getCommandReadModel: unused,
@@ -151,6 +162,12 @@ function makeThread(opts: {
   readonly branch?: string | null;
   readonly worktreePath?: string | null;
   readonly checkpoints?: ReadonlyArray<OrchestrationCheckpointSummary>;
+  // Task 6.3: explicit only for the `wait` ownership-failure tests -- left
+  // `null` (the default) everywhere else, in which case `buildWaitHarness`'s
+  // `setThread` auto-stamps it to that harness's own caller so every
+  // pre-existing `wait` test (which doesn't care about ownership) passes the
+  // new `assertOwnership` gate unchanged.
+  readonly parentThreadId?: ThreadId | null;
 }): OrchestrationThread {
   const messages = (opts.messages ?? []).map((message, index) => ({
     id: MessageId.makeUnsafe(randomUUID()),
@@ -179,6 +196,7 @@ function makeThread(opts: {
     modelSelection: { provider: opts.provider ?? "codex", model: opts.model ?? "gpt-5-codex" },
     runtimeMode: "full-access",
     envMode,
+    parentThreadId: opts.parentThreadId ?? null,
     branch: opts.branch ?? null,
     worktreePath: opts.worktreePath ?? (envMode === "worktree" ? "/tmp/subagent-worktree" : null),
     latestTurn,
@@ -257,17 +275,32 @@ function turnDiffCompletedEvent(threadId: ThreadId): OrchestrationEvent {
  * PubSub with NO replay buffer to exercise real subscribe-timing semantics --
  * that is the one that can distinguish the eager-subscribe fix from the
  * `Stream.toPull` bug it replaces.
+ *
+ * Task 6.3: also mints (or accepts) a `caller` for `wait`'s new ownership
+ * check. `setThread` auto-stamps `parentThreadId` to that caller's
+ * `threadId` UNLESS the given thread already carries an explicit (non-null)
+ * `parentThreadId` -- so every pre-existing test in this file (which never
+ * sets `parentThreadId` and doesn't care about ownership) keeps working
+ * unchanged by simply passing the harness's own `caller` to `wait`, while an
+ * ownership-focused test can still construct a thread parented to a
+ * DIFFERENT thread id to exercise the `"not-owner"` path. `getSubscribeCallCount`
+ * exposes how many times `engine.subscribeDomainEvents` was evaluated, so a
+ * `"not-owner"` test can assert the ownership check short-circuits BEFORE
+ * `wait` ever subscribes to the domain-event stream.
  */
-function buildWaitHarness() {
+function buildWaitHarness(caller: SubAgentCaller = { threadId: ThreadId.makeUnsafe(randomUUID()) }) {
   const eventPubSub = Effect.runSync(PubSub.unbounded<OrchestrationEvent>({ replay: 16 }));
   const threads = new Map<string, OrchestrationThread>();
+  let subscribeCalls = 0;
   const engine: OrchestrationEngineShape = {
     readEvents: () => Stream.empty,
     getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
     dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
     repairState: () => Effect.die(new Error("repairState unused in test")),
     streamDomainEvents: Stream.fromPubSub(eventPubSub),
-    subscribeDomainEvents: PubSub.subscribe(eventPubSub),
+    subscribeDomainEvents: Effect.sync(() => {
+      subscribeCalls += 1;
+    }).pipe(Effect.flatMap(() => PubSub.subscribe(eventPubSub))),
   };
   const layer = SubAgentOrchestratorLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
@@ -280,12 +313,16 @@ function buildWaitHarness() {
   );
   const runtime = ManagedRuntime.make(layer);
   const setThread = (thread: OrchestrationThread): void => {
-    threads.set(thread.id, thread);
+    threads.set(
+      thread.id,
+      thread.parentThreadId === null ? { ...thread, parentThreadId: caller.threadId } : thread,
+    );
   };
+  const getSubscribeCallCount = (): number => subscribeCalls;
   const pushEvent = (event: OrchestrationEvent): void => {
     Effect.runSync(PubSub.publish(eventPubSub, event));
   };
-  return { runtime, setThread, pushEvent };
+  return { runtime, setThread, pushEvent, caller, getSubscribeCallCount };
 }
 
 /**
@@ -312,6 +349,16 @@ function createMidSeedProjectionStub(
       const thread = threads.get(threadId);
       return thread ? Option.some(thread) : Option.none();
     });
+  // Task 6.3: `wait`'s `assertOwnership` step reads this BEFORE the mid-seed
+  // regression it exercises even begins (ownership is checked first, before
+  // the domain-event subscription), so this must be a working read -- not
+  // `unused` -- derived off the SAME `threads` map, mirroring
+  // `createProjectionStub`'s fallback.
+  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
+    Effect.sync(() => {
+      const thread = threads.get(threadId);
+      return thread ? Option.some(deriveShellFromThread(thread)) : Option.none();
+    });
   return {
     getCommandReadModel: unused,
     getSnapshot: unused,
@@ -323,7 +370,7 @@ function createMidSeedProjectionStub(
     getFirstActiveThreadIdByProjectId: unused,
     getThreadCheckpointContext: unused,
     getFullThreadDiffContext: unused,
-    getThreadShellById: unused,
+    getThreadShellById,
     findSyntheticSubagentParentThread: unused,
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
@@ -344,6 +391,11 @@ function createMidSeedProjectionStub(
 function buildMidSeedWaitHarness(midSeedThreadId: ThreadId, midSeedEvent: OrchestrationEvent) {
   const eventPubSub = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
   const threads = new Map<string, OrchestrationThread>();
+  // Task 6.3: same auto-caller/auto-stamp convenience as `buildWaitHarness`
+  // (see its doc comment) -- this harness has exactly one test, and that
+  // test doesn't care about ownership, so `parentThreadId` is always
+  // auto-stamped here.
+  const caller: SubAgentCaller = { threadId: ThreadId.makeUnsafe(randomUUID()) };
   const publishEvent = (event: OrchestrationEvent): void => {
     Effect.runSync(PubSub.publish(eventPubSub, event));
   };
@@ -366,9 +418,12 @@ function buildMidSeedWaitHarness(midSeedThreadId: ThreadId, midSeedEvent: Orches
   );
   const runtime = ManagedRuntime.make(layer);
   const setThread = (thread: OrchestrationThread): void => {
-    threads.set(thread.id, thread);
+    threads.set(
+      thread.id,
+      thread.parentThreadId === null ? { ...thread, parentThreadId: caller.threadId } : thread,
+    );
   };
-  return { runtime, setThread };
+  return { runtime, setThread, caller };
 }
 
 function resultById<T extends { readonly agentId: string }>(
@@ -533,6 +588,32 @@ function makeCaller(
 }
 
 const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
+
+/**
+ * Projects a full `OrchestrationThread` (detail) down to its
+ * `OrchestrationThreadShell` fields (Task 6.3), so a harness backed only by a
+ * `threads: Map<string, OrchestrationThread>` (every `wait` test's
+ * `buildWaitHarness`) can also answer `getThreadShellById` -- which `wait`'s
+ * new `assertOwnership` step reads -- from that SAME map, without a test
+ * needing to separately maintain a `shellThreads` array in lockstep.
+ */
+function deriveShellFromThread(thread: OrchestrationThread): OrchestrationThreadShell {
+  return decodeThreadShell({
+    id: thread.id,
+    projectId: thread.projectId,
+    title: thread.title,
+    modelSelection: thread.modelSelection,
+    runtimeMode: thread.runtimeMode,
+    envMode: thread.envMode,
+    branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    parentThreadId: thread.parentThreadId,
+    latestTurn: thread.latestTurn,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+    session: thread.session,
+  });
+}
 
 /**
  * A minimal `OrchestrationThreadShell` for a caller's candidate child, for
@@ -1395,7 +1476,7 @@ describe("SubAgentOrchestrator.cascadeStopChildren (Task 5.3)", () => {
 
 describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   it("returns one completed envelope with the child's last assistant message once its turn finishes", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // Seed NON-terminal (session running) so resolution is driven purely by the
     // domain-event stream, not the seed snapshot.
@@ -1422,7 +1503,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results).toHaveLength(1);
@@ -1441,7 +1522,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("returns a failed envelope carrying the session error when the child errors", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // Seed running (non-terminal) with the lastError already on the thread so the
     // build-time read surfaces it; the error session-set event drives the failed
@@ -1468,7 +1549,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results).toHaveLength(1);
@@ -1480,7 +1561,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("returns a running envelope on timeout instead of hanging", async () => {
-    const { runtime, setThread } = buildWaitHarness();
+    const { runtime, setThread, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // Never-finishing child: seeded running, no terminal event ever pushed.
     setThread(
@@ -1500,7 +1581,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // timeoutSeconds clamps to 1s (PositiveInt floor) — the call returns rather
       // than hanging for the 600s default.
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results).toHaveLength(1);
@@ -1512,7 +1593,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("does not mark a freshly-spawned, not-yet-run child as completed at bare seed idle", async () => {
-    const { runtime, setThread } = buildWaitHarness();
+    const { runtime, setThread, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // A fresh spawn before the engine has picked up its queued turn: no
     // latestTurn, no assistant output, session sitting at a bare idle/starting
@@ -1533,7 +1614,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // timeoutSeconds clamps to 1s (PositiveInt floor) — proves it returns
       // "running" rather than hanging or wrongly resolving "completed".
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results).toHaveLength(1);
@@ -1544,7 +1625,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("resolves a child that is already terminal at seed time without hanging", async () => {
-    const { runtime, setThread } = buildWaitHarness();
+    const { runtime, setThread, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // Already idle after a completed turn — must resolve immediately from the seed
     // snapshot, not wait for an event or the timeout.
@@ -1563,7 +1644,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -1574,7 +1655,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("mode 'any' resolves as soon as the first child finishes", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const finished = ThreadId.makeUnsafe(randomUUID());
     const stillRunning = ThreadId.makeUnsafe(randomUUID());
     setThread(
@@ -1614,6 +1695,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // than waiting on the still-running one (or the timeout).
       const results = await runtime.runPromise(
         orchestrator.wait(
+          caller,
           decodeWaitInput({ agentIds: [finished, stillRunning], mode: "any", timeoutSeconds: 60 }),
         ),
       );
@@ -1628,7 +1710,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   });
 
   it("preserves agentIds order and detects idle-after-run completion", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     // Both children resolve via the SAME real run -> finish transition
     // (seeded "running", then a session-set event returns them to idle with no
     // active turn) — only the RESOLUTION order differs from the RESULT order,
@@ -1675,6 +1757,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // follows the input, not resolution order.
       const results = await runtime.runPromise(
         orchestrator.wait(
+          caller,
           decodeWaitInput({ agentIds: [childB, childA], mode: "all", timeoutSeconds: 30 }),
         ),
       );
@@ -1689,18 +1772,100 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
     }
   });
 
-  it("fails the whole call with unknown-agent when an agentId has no backing thread", async () => {
-    const { runtime } = buildWaitHarness();
+  // Task 6.3: BEFORE the ownership check landed, a nonexistent agentId
+  // surfaced from `wait`'s own seed-loop read as `"unknown-agent"`. Now
+  // `assertOwnership` runs FIRST and treats "no backing thread" as
+  // unauthorized (fail closed, the same way `sendMessage`/`stopAgent` already
+  // do) -- so a totally nonexistent agentId now fails with `"not-owner"`
+  // before `wait` ever reaches its own seed loop. `"unknown-agent"` remains
+  // reachable only for the narrow race where a target disappears AFTER
+  // ownership was confirmed (not exercised here).
+  it("fails the whole call with not-owner when an agentId has no backing thread", async () => {
+    const { runtime, caller, getSubscribeCallCount } = buildWaitHarness();
     const missing = ThreadId.makeUnsafe(randomUUID());
 
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const error = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [missing], mode: "all" })).pipe(Effect.flip),
+        orchestrator
+          .wait(caller, decodeWaitInput({ agentIds: [missing], mode: "all" }))
+          .pipe(Effect.flip),
       );
 
       expect(error).toBeInstanceOf(SubAgentError);
-      expect(error.reason).toBe("unknown-agent");
+      expect(error.reason).toBe("not-owner");
+      expect(getSubscribeCallCount()).toBe(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with not-owner, before any domain-event subscription, when the agentId exists but is not the caller's child (Task 6.3)", async () => {
+    const { runtime, setThread, caller, getSubscribeCallCount } = buildWaitHarness();
+    const otherParent = ThreadId.makeUnsafe(randomUUID());
+    const notMyChild = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: notMyChild,
+        parentThreadId: otherParent,
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(notMyChild, { status: "idle", activeTurnId: null }),
+        latestTurnState: "completed",
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator
+          .wait(caller, decodeWaitInput({ agentIds: [notMyChild], mode: "all" }))
+          .pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      // Zero subscriptions proves the ownership check ran BEFORE step 1
+      // ("subscribe to the domain-event PubSub") -- a rejected `wait` call
+      // has no side effects, exactly like a rejected `sendMessage`/`stopAgent`.
+      expect(getSubscribeCallCount()).toBe(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails the whole call with not-owner when only ONE of several agentIds is not the caller's child (Task 6.3)", async () => {
+    const { runtime, setThread, caller, getSubscribeCallCount } = buildWaitHarness();
+    const ownedChild = ThreadId.makeUnsafe(randomUUID());
+    const notMyChild = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: ownedChild,
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(ownedChild, { status: "idle", activeTurnId: null }),
+        latestTurnState: "completed",
+      }),
+    );
+    setThread(
+      makeThread({
+        id: notMyChild,
+        parentThreadId: ThreadId.makeUnsafe(randomUUID()),
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(notMyChild, { status: "idle", activeTurnId: null }),
+        latestTurnState: "completed",
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator
+          .wait(caller, decodeWaitInput({ agentIds: [ownedChild, notMyChild], mode: "all" }))
+          .pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      expect(getSubscribeCallCount()).toBe(0);
     } finally {
       await runtime.dispose();
     }
@@ -1718,7 +1883,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       child,
       makeSession(child, { status: "idle", activeTurnId: null }),
     );
-    const { runtime, setThread } = buildMidSeedWaitHarness(child, midSeedEvent);
+    const { runtime, setThread, caller } = buildMidSeedWaitHarness(child, midSeedEvent);
     // The seed snapshot itself is still non-terminal ("running", active turn) --
     // resolution must come from the mid-seed published event being caught by the
     // eager subscription, not from the seed read itself.
@@ -1751,7 +1916,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       // through to "running". This is the assertion that distinguishes fixed
       // from broken.
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
       const elapsedMs = Date.now() - startedAt;
 
@@ -1767,7 +1932,7 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
 
 describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   it("populates diff for a worktree child whose latest checkpoint has files", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     const checkpoint = makeCheckpoint({
       checkpointTurnCount: 1,
@@ -1798,7 +1963,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -1813,7 +1978,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   });
 
   it("picks the checkpoint with the highest checkpointTurnCount when a worktree child has multiple", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     const earlier = makeCheckpoint({
       checkpointTurnCount: 1,
@@ -1844,7 +2009,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results[0]?.diff).toEqual({
@@ -1858,7 +2023,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   });
 
   it("returns diff:null for a share-cwd (envMode:'local') child even with checkpoints", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
@@ -1883,7 +2048,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results[0]?.status).toBe("completed");
@@ -1894,7 +2059,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   });
 
   it("returns diff:null for a worktree child with no checkpoints at all", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
@@ -1920,7 +2085,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
       // a small overall timeout clamps that settle window down to ~1s
       // instead of the full SUBAGENT_DIFF_SETTLE_SECONDS grace window.
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -1930,7 +2095,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   });
 
   it("returns diff:null for a worktree child whose only checkpoint has empty files", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
@@ -1953,7 +2118,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
       // See the sibling "no checkpoints at all" test above for why
       // timeoutSeconds:1 (Task 4.3b settle interaction).
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -1963,7 +2128,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
   });
 
   it("returns diff:null for a worktree child with a filled checkpoint but branch:null", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
@@ -1989,7 +2154,7 @@ describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
     try {
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
 
       expect(results[0]?.diff).toBeNull();
@@ -2021,7 +2186,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
   }
 
   it("settles for a worktree child's file-bearing checkpoint before finalizing, capturing the diff", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     // Session goes idle-completed with NO file-bearing checkpoint yet -- the
     // mainline race this task fixes: CheckpointReactor (real git I/O,
@@ -2034,7 +2199,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
       const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
       const startedAt = Date.now();
       const waitPromise = runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 5 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 5 })),
       );
       // Simulate CheckpointReactor's independent, concurrently-forked git I/O
       // landing the real file-bearing checkpoint shortly after -- well within
@@ -2067,7 +2232,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
   });
 
   it("returns diff:null after the grace window elapses when no checkpoint ever arrives (no hang)", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(settleThread(child, "subagent/never", []));
     pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
@@ -2082,7 +2247,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
       // already-buffered event almost instantly, so nearly the whole clamped
       // 1s budget is still "remaining" when settle starts).
       const results = await runtime.runPromise(
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
       );
       const elapsedMs = Date.now() - startedAt;
 
@@ -2097,7 +2262,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
   });
 
   it("does not settle a share-cwd (envMode:'local') child -- finalizes immediately with diff:null", async () => {
-    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const { runtime, setThread, pushEvent, caller } = buildWaitHarness();
     const child = ThreadId.makeUnsafe(randomUUID());
     setThread(
       makeThread({
@@ -2121,7 +2286,7 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
         // A generous timeoutSeconds -- if the share child were (wrongly)
         // subjected to settle it would take multiple seconds; asserting a
         // tight elapsed bound below proves it wasn't.
-        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+        orchestrator.wait(caller, decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
       );
       const elapsedMs = Date.now() - startedAt;
 

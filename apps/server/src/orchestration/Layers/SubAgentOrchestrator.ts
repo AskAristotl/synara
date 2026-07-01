@@ -765,12 +765,29 @@ export const SubAgentOrchestratorLive = Layer.effect(
         return { agentId: childThreadId };
       });
 
-    const wait: SubAgentOrchestratorShape["wait"] = (input) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const timeoutSeconds = clampWaitSeconds(
-            input.timeoutSeconds ?? SUBAGENT_WAIT_MAX_SECONDS,
-          );
+    // Task 6.3: `wait` is ownership-checked, mirroring `sendMessage`/
+    // `stopAgent` (Task 6.1). Every requested `agentId` must be a thread
+    // whose `parentThreadId === caller.threadId` (`assertOwnership` above),
+    // checked ONE AT A TIME, in `input.agentIds` order, as the very FIRST
+    // step -- strictly before the domain-event subscription and seed reads
+    // in the scoped block below. The first non-owned (or nonexistent)
+    // `agentId` fails the whole call with `SubAgentError` reason
+    // `"not-owner"` and short-circuits the rest of the loop (a `for` loop
+    // yielding a failing effect aborts the generator immediately), so a
+    // rejected `wait` call never subscribes to the domain-event stream and
+    // never reads any child's projection -- zero side effects, exactly like
+    // a rejected `sendMessage`/`stopAgent`.
+    const wait: SubAgentOrchestratorShape["wait"] = (caller, input) =>
+      Effect.gen(function* () {
+        for (const agentId of input.agentIds) {
+          yield* assertOwnership(caller, agentId);
+        }
+
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const timeoutSeconds = clampWaitSeconds(
+              input.timeoutSeconds ?? SUBAGENT_WAIT_MAX_SECONDS,
+            );
           // The single absolute deadline this whole `wait` call is bounded
           // by -- both step 4's overall resolution wait AND (Task 4.3b) each
           // worktree child's post-completion checkpoint settle are clamped
@@ -932,8 +949,9 @@ export const SubAgentOrchestratorLive = Layer.effect(
             results.push(buildSubAgentResult(agentId, thread, outcome));
           }
           return results;
-        }),
-      );
+          }),
+        );
+      });
 
     // Task 6.1: start a follow-up turn on a child the caller already spawned.
     // Ownership is checked FIRST (`assertOwnership` above) -- a rejected call
@@ -1034,22 +1052,21 @@ export const SubAgentOrchestratorLive = Layer.effect(
     //   `thread.session.stop` for a plain-UUID child calls neither
     //   `interruptTurn` nor `stopSession` (the projection still lands on
     //   `"stopped"` regardless), while a separate interrupt would misfire at
-    //   the parent. Given that, the minimal AND safe choice is a bare
-    //   session-stop.
+    //   the parent -- true of `resolveProviderSessionThread` AT THE TIME this
+    //   was written (Task 5.3). Given that, the minimal AND safe choice was a
+    //   bare session-stop.
     //
-    // NOTE (concern, tracked for follow-up, out of THIS task's scope): this
-    // means a cross-model child's underlying provider PROCESS is not
-    // reliably torn down by `thread.session.stop` today -- only its
-    // orchestration-level session status is. Fixing that requires changing
-    // `ProviderCommandReactor.ts`'s `resolveProviderSessionThread` to
-    // distinguish the two "parentThreadId" cases (e.g. by also checking the
-    // `subagent:` id prefix in its "has parentThreadId" branch, mirroring
-    // what `inferParentThreadFromSyntheticSubagentId` already does in its
-    // "no parentThreadId" branch) -- a cross-cutting change to shared,
-    // heavily-tested provider-command routing that this task's file list
-    // does not include, and is out of scope for cascade-stop itself
-    // (cascade-stop's job is ensuring the STOP COMMAND reaches every live
-    // child, not fixing how an existing single-thread stop is routed).
+    // RESOLVED (was tracked as a follow-up here, now fixed by Task 5.3b):
+    // `ProviderCommandReactor.ts`'s `resolveProviderSessionThread` now checks
+    // the `subagent:` id prefix (via `resolveSubagentProviderThreadId`)
+    // before treating a non-null `parentThreadId` as the shared-session case,
+    // so it correctly resolves a cross-model child (plain, non-prefixed
+    // `ThreadId`) to ITSELF rather than to its parent. `processSessionStopRequested`
+    // therefore now finds `ownsProviderSession === true` for a cross-model
+    // child and calls `providerService.stopSession` against the CHILD's own
+    // provider session -- the child's underlying provider process IS
+    // reliably torn down by this bare `thread.session.stop`, not just its
+    // orchestration-level session status.
     const stop: SubAgentOrchestratorShape["stop"] = (agentId) =>
       engine
         .dispatch({

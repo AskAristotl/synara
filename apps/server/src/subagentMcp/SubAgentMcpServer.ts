@@ -9,10 +9,11 @@
  * `SessionTokenRegistry` and forwards the parsed JSON body here.
  *
  * Registers all four v1 sub-agent tools (design decision 11): `spawn_agent`,
- * `wait`, `send_message`, and `stop_agent` (Task 6.1). `send_message` starts a
- * follow-up turn on a child the caller already spawned; `stop_agent` stops
- * one. Both are ownership-checked server-side by
- * `SubAgentOrchestrator.sendMessage`/`stopAgent`
+ * `wait`, `send_message`, and `stop_agent` (Task 6.1; `wait` ownership-gated
+ * in Task 6.3). `send_message` starts a follow-up turn on a child the caller
+ * already spawned; `stop_agent` stops one; `wait` blocks on one or more. All
+ * three are ownership-checked server-side by
+ * `SubAgentOrchestrator.sendMessage`/`stopAgent`/`wait`
  * (`orchestration/Layers/SubAgentOrchestrator.ts`'s `assertOwnership`) — a
  * caller can only target an `agentId` it spawned itself, never an arbitrary
  * thread id or another caller's child.
@@ -191,10 +192,12 @@ const WAIT_TOOL: McpToolDefinition = {
   name: "wait",
   description:
     "Block until the given sub-agent(s) (agentIds returned by spawn_agent) reach a terminal " +
-    "state, or until the timeout elapses. Returns one result envelope per agentId with fields " +
-    "including status, finalMessage, and diff. If a sub-agent is still working when the timeout " +
-    'elapses, its envelope has status:"running" — this is a valid result, NOT an error; call ' +
-    "wait again with the same agentId to keep waiting.",
+    "state, or until the timeout elapses. Only works on agentIds returned by your own " +
+    "spawn_agent calls — waiting on any other agentId fails with a not-owner error. Returns " +
+    "one result envelope per agentId with fields including status, finalMessage, and diff. If " +
+    'a sub-agent is still working when the timeout elapses, its envelope has status:"running" ' +
+    "— this is a valid result, NOT an error; call wait again with the same agentId to keep " +
+    "waiting.",
   inputSchema: {
     type: "object",
     properties: {
@@ -466,14 +469,26 @@ export const SubAgentMcpServerLive = Layer.effect(
         return toolSuccessResult({ agentId: spawned.success.agentId });
       });
 
-    const handleWait = (rawArgs: unknown): Effect.Effect<McpToolCallResult> =>
+    // Task 6.3: `wait` is ownership-checked, mirroring `send_message`/
+    // `stop_agent` (Task 6.1) -- `caller` (the resolved `SessionTokenIdentity`,
+    // `{threadId, canSpawn}`) is passed straight through to
+    // `SubAgentOrchestrator.wait`, which only needs `caller.threadId` (see
+    // `SubAgentCaller`). Ownership itself (is every requested `agentId`
+    // actually this caller's child?) is enforced server-side by the
+    // orchestrator's `assertOwnership`, not here -- a `not-owner`
+    // `SubAgentError` falls through to the same `toolErrorResult` mapping as
+    // every other reason.
+    const handleWait = (
+      caller: SessionTokenIdentity,
+      rawArgs: unknown,
+    ): Effect.Effect<McpToolCallResult> =>
       Effect.gen(function* () {
         const decoded = yield* Effect.result(decodeWaitInput(rawArgs));
         if (Result.isFailure(decoded)) {
           return toolErrorResult("invalid-arguments", formatSchemaIssue(decoded.failure));
         }
 
-        const waited = yield* Effect.result(orchestrator.wait(decoded.success));
+        const waited = yield* Effect.result(orchestrator.wait(caller, decoded.success));
         if (Result.isFailure(waited)) {
           const error: SubAgentError = waited.failure;
           return toolErrorResult(error.reason, error.detail);
@@ -538,7 +553,7 @@ export const SubAgentMcpServerLive = Layer.effect(
         case SPAWN_AGENT_TOOL.name:
           return handleSpawnAgent(caller, args);
         case WAIT_TOOL.name:
-          return handleWait(args);
+          return handleWait(caller, args);
         case SEND_MESSAGE_TOOL.name:
           return handleSendMessage(caller, args);
         case STOP_AGENT_TOOL.name:
