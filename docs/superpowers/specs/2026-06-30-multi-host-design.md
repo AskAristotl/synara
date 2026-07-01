@@ -4,6 +4,8 @@
 **Status:** Approved (design); implementation pending
 **Author:** Dylan + Claude (brainstorming session)
 
+_Updated 2026-06-30 to reflect the shipped implementation._
+
 ## Summary
 
 Let a single Synara client connect to multiple Synara backends ("hosts") and
@@ -45,8 +47,8 @@ session sharing, or transport. Synara owns the entire stack.
   `http://<tailnet-ip>:port` — no in-app notion of host A vs host B.
 - **Auth is same-origin cookie-based**: `requestAuthJson` calls relative
   `/api/auth/*` paths with `credentials: "same-origin"`, and the WS is served
-  from the page origin. → The app can only authenticate to *the host that served
-  it*.
+  from the page origin. → The app can only authenticate to _the host that served
+  it_.
 - The server-side auth chain we build on already exists:
   - `issuePairingCredential` (owner-only) mints a one-time pairing credential.
   - `exchangeBootstrapCredentialForBearerSession` (`POST /api/auth/bootstrap/bearer`)
@@ -63,12 +65,16 @@ session sharing, or transport. Synara owns the entire stack.
 2. **Connect method: pairing link / QR.** Host mints a one-time credential
    encoded in a link; client redeems it for a durable per-device bearer.
    (Rejected: manual URL+token; auto-discovery; host-side approval.)
-3. **Host runtime: works headless and in the GUI.** A shared `PairingService`
-   backs a CLI command, a served page, and the desktop GUI.
+3. **Host runtime: works headless and in the GUI.** A shared pairing service
+   backs both surfaces — the startup-printed pairing link/QR (headless) and
+   the Settings → Devices panel (GUI/desktop).
 4. **Implementation shape: rebuild-on-switch (Approach 1).** Keep one transport +
-   native-API at a time; on switch, tear down and rebuild pointed at the new
-   host. Smallest blast radius for a large single-host codebase. (Rejected:
-   keep-warm pool; reload-the-webview.)
+   native-API at a time; on switch, persist the new active host and do a full
+   page reload — the app re-initializes against the new active host on boot,
+   so there's no in-memory teardown/rebuild to get right. Simplest correct
+   rebuild, bulletproof, and still smallest blast radius for a large
+   single-host codebase. (Rejected: keep-warm pool; in-memory
+   teardown/rebuild without a reload.)
 5. **Local host stays on loopback.** Only remote hosts use the new bearer path —
    zero regression risk on the most-common path.
 6. **Paste-link is first-class on every client** (desktop and mobile). QR is a
@@ -103,7 +109,7 @@ pairing required (loopback trust via the existing desktop bridge path). On a
 phone there is no local host — the list is purely remote.
 
 **App-shell origin vs active host can differ.** The desktop bundles the web app
-and connects out to any host. The phone loads the web app *from* a host (its
+and connects out to any host. The phone loads the web app _from_ a host (its
 shell origin = that host). Both are handled uniformly by the bearer model.
 
 ### Auth: same-origin cookie → per-host bearer (remote only)
@@ -121,10 +127,22 @@ shell origin = that host). Both are handled uniformly by the bearer model.
   opens `wss://<host>/ws?token=<wsToken>`. On reconnect it re-issues. The durable
   bearer never travels on the socket URL — only the ephemeral ws-token does.
 - **Server CORS:** add cross-origin support on the auth/RPC HTTP routes for the
-  bearer path, with `Access-Control-Allow-Headers: Authorization`. Safe because
-  there are no ambient cookies to ride along (no
-  `Access-Control-Allow-Credentials`). The local loopback path is unaffected; the
-  WS upgrade is not subject to CORS and is gated by the ws-token.
+  bearer path, with `Access-Control-Allow-Headers: Authorization`. Shipped as
+  `appCorsHeaders` (`apps/server/src/appCors.ts`): it reflects **any** request
+  origin back on these routes (not just the desktop `t3://app` origin — see
+  note below), precisely because there's no `Access-Control-Allow-Credentials`
+  and thus no ambient cookie for a malicious page to ride along with; a
+  reflected origin can read the response, but it never had the caller's bearer
+  to send in the first place. The local loopback path is unaffected.
+  - Note: the desktop app's origin is `t3://app`; it's one of the origins this
+    reflects, not a special case.
+- **`/ws` upgrade and origin:** the WS upgrade is not subject to CORS, but it
+  does apply its own origin check for **token-less** connections (the existing
+  ambient-cookie CSRF guard). A connection that supplies an explicit token
+  (`?token=` / `?wsToken=`) is exempt from that origin check — the token
+  itself is bearer-derived proof of authorization, so origin doesn't add
+  anything, and gating on it would block legitimate cross-origin multi-host
+  clients (e.g. a phone on origin A connecting to host B).
 
 ### Pairing: one link format, two consumption paths
 
@@ -132,10 +150,10 @@ A pairing link is an **https deep link to the host** with the one-time credentia
 in the URL **fragment** (fragments are not sent to servers / not logged):
 
 ```
-https://mac-studio.ts.net:3773/pair#c=<one-time-credential>
+https://mac-studio.ts.net:3773/pair#token=<one-time-credential>
 ```
 
-The origin *is* the host's `baseUrl`; the fragment carries the credential.
+The origin _is_ the host's `baseUrl`; the fragment carries the credential.
 
 - **Phone:** scans QR (or taps/pastes the link) → browser opens the URL → the
   host serves the web app's new `/pair` route → it reads the fragment and redeems
@@ -147,14 +165,28 @@ The origin *is* the host's `baseUrl`; the fragment carries the credential.
 Redemption maps directly onto `exchangeBootstrapCredentialForBearerSession`. A new
 web route `/pair` is added (SPA fallback already serves it).
 
-### Pairing generation surfaces (shared `PairingService` over `issuePairingCredential`)
+### Pairing generation surfaces (shared service over `issuePairingCredential`)
 
-- **CLI:** `synara pair [--label] [--expires 10m]` — authorized via
-  **loopback = owner** (consistent with the Local decision); prints the link, the
-  MagicDNS URL, and a terminal QR (plus optional PNG).
-- **Served page:** `GET /pair/new` (owner-authed) renders QR + link, so any
-  already-authed device can mint one.
-- **Desktop GUI:** Settings → Devices → "Add a device" renders the same QR + link.
+No `synara pair` CLI subcommand and no served `GET /pair/new` page were built.
+What shipped instead, both built on the same underlying service
+(`issuePairingCredential` mints the one-time credential;
+`issueStartupPairingUrl` / `issueClientPairingUrl` wrap it into a `/pair#token=`
+link):
+
+- **Headless/startup surface:** when the server boots in remote-reachable mode
+  (no loopback/desktop-managed/no-auth guard), it prints a pairing link plus a
+  terminal QR code to the log as part of startup — no extra command needed to
+  onboard the first remote device. When bound to a wildcard address
+  (`0.0.0.0`), the base URL embedded in this link isn't `localhost` (that's
+  unreachable from another device) — it's resolved from the host's network
+  interfaces, preferring a Tailscale/tailnet address (`100.64.0.0/10`) over
+  any other LAN address, since a phone scanning the QR needs an address it can
+  actually reach (`resolvePairingBaseUrl` in
+  `apps/server/src/pairingBaseUrl.ts`).
+- **In-app Settings → Devices panel** (`DevicesSettingsPanel`): a "Generate
+  pairing link" button calls the owner-only `POST /api/auth/pairing-url`
+  endpoint, renders the link + a QR code, and lists paired devices (from
+  `/api/auth/clients`) with per-device revoke.
 
 ### Client UI
 
@@ -172,17 +204,21 @@ web route `/pair` is added (SPA fallback already serves it).
 
 ### Rebuild-on-switch lifecycle
 
-On `activeHostId` change:
+Shipped as `switchActiveHost` (`apps/web/src/hosts/switchActiveHost.ts`). On
+`activeHostId` change:
 
-1. Dispose the current `WsTransport` and drop the native-API singleton
-   (`instance = null`).
-2. Reset all host-scoped stores (projects, threads, terminals, …) to empty.
-3. Build the new connection: **local** → existing loopback path; **remote** →
-   ensure bearer present → fetch ws-token → construct transport with `baseUrl` +
-   token.
-4. Re-run the existing init subscriptions (welcome / config / providers /
-   settings), now host-parameterized.
-5. UI shows "Connecting to <host>"; renders on welcome.
+1. Persist the new `activeHostId` in the host store.
+2. Call `resetAllHostScopedStores()` to clear host-scoped client state
+   (projects, threads, terminals, …).
+3. `window.location.reload()` — a full page reload.
+
+There's no in-memory teardown/rebuild of the transport or native-API
+singleton: the reload re-initializes the whole app (transport, auth,
+subscriptions) against the newly-persisted active host on boot, using the
+same connection-bootstrap path a cold load already goes through. This trades
+a brief flash/reconnect for eliminating an entire class of "stale singleton"
+bugs — considered worth it given switching is not a hot path (Non-goals: no
+keep-warm pool, a brief reconnect on switch is acceptable).
 
 Switching away **never stops** the other host's server-side sessions — agents
 keep running per-backend, so switching back just re-subscribes to live state.
@@ -195,8 +231,13 @@ This is what makes "session sharing" free.
   banner (retry / switch host). Never spin silently.
 - **ws-token expiry / 401 on reconnect:** re-issue ws-token from the stored
   bearer automatically.
-- **Bearer revoked** (device removed): connect fails auth → mark host
-  "needs re-pair," prompt to re-add; don't loop. Desktop can fall back to Local.
+- **Bearer revoked** (device removed): a 401 on the socket-URL resolve path is
+  detected as a distinct `RevokedHostCredentialError` (not lumped in with
+  generic unreachable errors), which flags the host `needsRepair` and shows a
+  "needs re-pairing" banner with a re-pair action (opens the Add-host dialog)
+  and, on desktop, a "Switch to Local" action; don't loop. The flag self-heals
+  automatically on the next successful connect (`serverWelcome`) and is also
+  cleared explicitly when a fresh credential is supplied via re-pair.
 - **Bad/expired pairing link on redeem:** clear inline error in the Add-host
   modal.
 - **Boot:** restore the last active host; if a remote is unreachable, still boot
@@ -222,7 +263,7 @@ This is what makes "session sharing" free.
   bearer → "needs re-pair" (extends `wsTransport.test.ts`, reuses
   `effectRpcWebSocketMock`).
 - **Server:** `bootstrap/bearer` redeem (happy + expired/invalid), CORS preflight
-  on bearer routes, loopback-owner for `synara pair`, pairing-link format.
+  on bearer routes, owner-only `pairing-url` endpoint, pairing-link format.
 - **Final verification pass:** `bun fmt`, `bun lint`, `bun typecheck`.
 
 ## Affected areas (orientation for the plan)
@@ -233,8 +274,9 @@ This is what makes "session sharing" free.
   abstraction, `HostConnection`, host switcher + Add-host UI, `/pair` route,
   Settings → Devices.
 - `apps/server/src/auth/http.ts` + auth services — CORS on bearer routes; shared
-  `PairingService`; `/pair/new` served page.
-- New CLI: `synara pair` (loopback-owner).
+  pairing service (`issuePairingCredential` / `issueStartupPairingUrl` /
+  `issueClientPairingUrl`); startup pairing banner; owner-only
+  `POST /api/auth/pairing-url`.
 - Desktop: `safeStorage` credential bridge; the Local host wiring.
 
 ## Rollout / sequencing (high level — detailed plan to follow)
@@ -243,8 +285,8 @@ This is what makes "session sharing" free.
 2. Client auth/transport: `HostConnection`, host-aware `requestAuthJson` + WS
    ws-token attach (remote path), with Local unchanged.
 3. Host store + rebuild-on-switch lifecycle + store resets.
-4. Pairing: `/pair` redeem route, Add-host paste-link, `PairingService`,
-   `synara pair` CLI, `/pair/new` page, desktop GUI generation.
+4. Pairing: `/pair` redeem route, Add-host paste-link, shared pairing service,
+   startup pairing banner (headless), Settings → Devices generation (GUI).
 5. UI: host switcher, connection status, Manage devices.
 6. Hardening: failure states (revoked / unreachable / expired), tests, docs
    (update `REMOTE.md`).
