@@ -3662,4 +3662,170 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.status).toBe("interrupted");
     expect(thread?.session?.activeTurnId).toBe("turn-child-stop");
   });
+
+  it("stops a cross-model sub-agent's OWN provider session, not the parent's (plain threadId, parentThreadId set)", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    const crossModelChildThreadId = ThreadId.makeUnsafe("cross-model-child-1");
+
+    // Parent has its own live provider session, distinguishable from the child.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-parent-for-cross-model-stop"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        session: {
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    // A cross-model sub-agent thread: a PLAIN (non `subagent:`-prefixed) id,
+    // with `parentThreadId` set to the caller, but its own real provider
+    // session on a different model/provider than the parent.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-create-cross-model-child"),
+        threadId: crossModelChildThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Cross-model sub-agent",
+        modelSelection: { provider: "claudeAgent", model: "claude-opus-4-8" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        parentThreadId: ThreadId.makeUnsafe("thread-1"),
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-cross-model-child"),
+        threadId: crossModelChildThreadId,
+        session: {
+          threadId: crossModelChildThreadId,
+          status: "ready",
+          providerName: "claudeAgent",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.makeUnsafe("cmd-session-stop-cross-model-child"),
+        threadId: crossModelChildThreadId,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find((entry) => entry.id === crossModelChildThreadId);
+      return thread?.session?.status === "stopped";
+    });
+
+    // The bug: `resolveProviderSessionThread` treated ANY thread with a
+    // `parentThreadId` as sharing the parent's provider session, so this
+    // stop would silently no-op (neither `stopSession` nor `interruptTurn`
+    // ever fired) instead of tearing down the child's OWN process.
+    expect(harness.stopSession.mock.calls.length).toBe(1);
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({
+      threadId: crossModelChildThreadId,
+    });
+    expect(harness.interruptTurn.mock.calls.length).toBe(0);
+  });
+
+  it("interrupts a cross-model sub-agent's OWN provider turn, not the parent's turn", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    const crossModelChildThreadId = ThreadId.makeUnsafe("cross-model-child-2");
+
+    // Parent has its own live turn running — this must never be touched by
+    // an interrupt targeting the child.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-parent-for-cross-model-interrupt"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        session: {
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-parent-own"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-create-cross-model-child-2"),
+        threadId: crossModelChildThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Cross-model sub-agent",
+        modelSelection: { provider: "claudeAgent", model: "claude-opus-4-8" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        parentThreadId: ThreadId.makeUnsafe("thread-1"),
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-cross-model-child-2"),
+        threadId: crossModelChildThreadId,
+        session: {
+          threadId: crossModelChildThreadId,
+          status: "running",
+          providerName: "claudeAgent",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-child-own"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.makeUnsafe("cmd-turn-interrupt-cross-model-child"),
+        threadId: crossModelChildThreadId,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    // Must target the child's OWN thread/turn -- never the parent's.
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
+      threadId: crossModelChildThreadId,
+      turnId: "turn-child-own",
+    });
+  });
 });

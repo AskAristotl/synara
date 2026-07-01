@@ -422,6 +422,21 @@ const make = Effect.gen(function* () {
     if (!thread.parentThreadId) {
       return (yield* inferParentThreadFromSyntheticSubagentId(thread.id)) ?? thread;
     }
+    // A non-null `parentThreadId` is shared by TWO different concepts:
+    //  - a provider-native subagent (a synthetic `subagent:<parentId>:<providerThreadId>`
+    //    thread id) that runs WITHIN the parent's own provider session/process
+    //    -> routes to the PARENT.
+    //  - a cross-model sub-agent (a plain, non-prefixed thread id minted by
+    //    `SubAgentOrchestrator.spawn`) that has its OWN independent provider
+    //    session -> routes to ITSELF.
+    // `resolveSubagentProviderThreadId` already encodes the exact prefix test
+    // (`subagent:${parentThreadId}:`) used to tell them apart elsewhere in
+    // this file, so reuse it here instead of a new ad-hoc string check.
+    const isProviderNativeSubagent =
+      resolveSubagentProviderThreadId(thread.id, thread.parentThreadId) !== undefined;
+    if (!isProviderNativeSubagent) {
+      return thread;
+    }
     const parentThread = yield* resolveThread(thread.parentThreadId);
     return parentThread ?? thread;
   });
