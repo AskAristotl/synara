@@ -13,9 +13,12 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Layer, ManagedRuntime, Option, PubSub, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
+import { ServerConfig } from "../../config.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderUnsupportedError } from "../../provider/Errors.ts";
 import {
   ProviderDiscoveryService,
@@ -34,6 +37,7 @@ import {
   SubAgentOrchestrator,
   type SubAgentSpawnCaller,
 } from "../Services/SubAgentOrchestrator.ts";
+import { OrchestrationLayerLive } from "../runtimeLayer.ts";
 import { SubAgentOrchestratorLive } from "./SubAgentOrchestrator.ts";
 
 const decodeSpawnInput = Schema.decodeUnknownSync(SubAgentSpawnInput);
@@ -909,6 +913,48 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       expect(results[0]?.status).toBe("completed");
       expect(results[0]?.finalMessage).toBe("finished during seed");
       expect(elapsedMs).toBeLessThan(500);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestratorLive layer wiring (Task 1.3: server composition regression)", () => {
+  /**
+   * `serverLayers.ts` provides `SubAgentOrchestratorLive`'s
+   * `OrchestrationEngineService`/`ProjectionSnapshotQuery` dependencies via
+   * the exact same `OrchestrationLayerLive` constant exercised here -- a real
+   * engine + projection query backed by an in-memory sqlite, mirroring the
+   * layer-wiring pattern already used by `OrchestrationEngine.test.ts` and
+   * `ProviderCommandReactor.test.ts`. Only `ProviderDiscoveryService` is
+   * stubbed: standing up the real `ProviderDiscoveryServiceLive` requires the
+   * full provider adapter registry (which spawns real provider CLI
+   * processes), which is out of scope for a focused wiring smoke test --
+   * this is the SAME discovery stub every other test in this file already
+   * uses. If `SubAgentOrchestratorLive`'s dependency set ever drifts from
+   * what `OrchestrationLayerLive` exports (the missing-dependency regression
+   * this task guards against), this test fails to construct the layer at
+   * runtime instead of silently compiling.
+   */
+  it("resolves SubAgentOrchestrator from the real OrchestrationLayerLive plus a discovery stub", async () => {
+    const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+      prefix: "t3-subagent-orchestrator-wiring-test-",
+    });
+    const orchestrationLayer = OrchestrationLayerLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+      Layer.provideMerge(serverConfigLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const layer = SubAgentOrchestratorLive.pipe(
+      Layer.provideMerge(orchestrationLayer),
+      Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
+    );
+    const runtime = ManagedRuntime.make(layer);
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      expect(typeof orchestrator.spawn).toBe("function");
+      expect(typeof orchestrator.wait).toBe("function");
     } finally {
       await runtime.dispose();
     }

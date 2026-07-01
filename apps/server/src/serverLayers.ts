@@ -11,6 +11,7 @@ import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationRe
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
+import { SubAgentOrchestratorLive } from "./orchestration/Layers/SubAgentOrchestrator";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer";
 
@@ -72,6 +73,14 @@ export function makeServerRuntimeServicesLayer() {
     Layer.provideMerge(OrchestrationLayerLive),
     Layer.provideMerge(TerminalLayerLive),
   );
+  // Engine + projection come from OrchestrationLayerLive, mirroring the sibling
+  // reactors above. `ProviderDiscoveryService` is intentionally left as an
+  // unresolved requirement here -- it is satisfied by `makeServerProviderLayer()`
+  // at the composition root (`main.ts`'s `LayerLive`), the same way
+  // `providerCommandReactorLayer` above leaves `ProviderService` unresolved.
+  const subAgentOrchestratorLayer = SubAgentOrchestratorLive.pipe(
+    Layer.provideMerge(OrchestrationLayerLive),
+  );
   // Shares the single memoized TerminalManager with the top-level TerminalLayerLive.
   const devServerManagerLayer = DevServerManagerLive.pipe(Layer.provide(TerminalLayerLive));
   const sessionCredentialLayer = SessionCredentialServiceLive.pipe(
@@ -117,6 +126,7 @@ export function makeServerRuntimeServicesLayer() {
     automationRunReactorLayer,
     orchestrationReactorLayer,
     threadDeletionReactorLayer,
+    subAgentOrchestratorLayer,
     devServerManagerLayer,
     GitLayerLive,
     TextGenerationLayerLive,
