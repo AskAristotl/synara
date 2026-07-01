@@ -33,19 +33,31 @@ import type { Effect } from "effect";
  * SubAgentErrorReason - Discriminating reason for a sub-agent operation failure.
  *
  * Starts with the failures `spawn` can produce in Phase 1. Adding a reason is a
- * one-line change here; later tasks introduce governance reasons such as
- * `"depth-limit"`, `"concurrency-limit"`, and `"not-owner"` (Task 5.2) and
- * lifecycle reasons for `wait` / `stop`. `"model-unavailable"` covers a spawn
- * with no explicit `model` for a provider whose `getDefaultModel` has no
- * default (e.g. `pi`) — fail fast instead of dispatching a thread with a null
- * model. `"unknown-agent"` is the `wait` failure for an `agentId` that has no
- * backing thread (no envelope can be built without a provider); `"wait-failed"`
- * covers an infra read failure while collecting child state. `"worktree-failed"`
- * covers a `workspace:"worktree"` spawn (Task 4.1) that could not resolve the
- * parent project's repo root or provision the isolated Git worktree, or (Task
- * 4.2) that could not snapshot the parent's uncommitted changes for
- * `includeWip` — `spawn` fails before dispatching any command, so no
- * half-created thread is left behind.
+ * one-line change here; a later task introduces the governance reason
+ * `"not-owner"` and lifecycle reasons for `wait` / `stop`. `"depth-limit"`
+ * (Task 5.2) is `spawn`'s FIRST check: `caller.canSpawn === false` fails
+ * before any I/O -- defense-in-depth alongside the MCP layer
+ * (`subagentMcp/SubAgentMcpServer.ts`), which already refuses to expose the
+ * spawn tool to a sub-agent thread, but the orchestrator enforces depth-1
+ * itself too so no other caller of `spawn` can bypass it. `"concurrency-limit"`
+ * (Task 5.2) is `spawn`'s SECOND check, run only once depth-1 has passed: the
+ * caller already has `SUBAGENT_MAX_LIVE_PER_ROOT` (`@t3tools/shared/subagent`)
+ * LIVE children -- see `isLiveChildSession` in `Layers/SubAgentOrchestrator.ts`
+ * for the exact "live" predicate -- so spawning one more would exceed the
+ * per-root cap; also covers an infra failure reading the caller's live-child
+ * count (the concurrency check could not be completed, so the cap cannot be
+ * guaranteed and the spawn fails closed under this same reason).
+ * `"model-unavailable"` covers a spawn with no explicit `model` for a provider
+ * whose `getDefaultModel` has no default (e.g. `pi`) — fail fast instead of
+ * dispatching a thread with a null model. `"unknown-agent"` is the `wait`
+ * failure for an `agentId` that has no backing thread (no envelope can be
+ * built without a provider); `"wait-failed"` covers an infra read failure
+ * while collecting child state. `"worktree-failed"` covers a
+ * `workspace:"worktree"` spawn (Task 4.1) that could not resolve the parent
+ * project's repo root or provision the isolated Git worktree, or (Task 4.2)
+ * that could not snapshot the parent's uncommitted changes for `includeWip`
+ * — `spawn` fails before dispatching any command, so no half-created thread
+ * is left behind.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
@@ -54,6 +66,8 @@ export const SubAgentErrorReason = Schema.Literals([
   "unknown-agent",
   "wait-failed",
   "worktree-failed",
+  "depth-limit",
+  "concurrency-limit",
 ]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 
@@ -84,8 +98,9 @@ export class SubAgentError extends Schema.TaggedErrorClass<SubAgentError>()("Sub
  * `resolveThreadWorkspaceCwd` (`@t3tools/shared/threadEnvironment`) needs to
  * resolve a cwd. The share-cwd workspace path copies these verbatim onto the
  * child thread so the child resolves to the same cwd as the caller. `canSpawn`
- * reflects the depth-1 governance flag; it is accepted here but not yet
- * enforced (enforcement lands in Task 5.2).
+ * reflects the depth-1 governance flag; `spawn` (Task 5.2) enforces it as the
+ * very first check, before any I/O, failing with `SubAgentError` reason
+ * `"depth-limit"` when `false`.
  */
 export interface SubAgentSpawnCaller {
   readonly threadId: ThreadId;
@@ -109,11 +124,19 @@ export interface SubAgentOrchestratorShape {
    *
    * Non-blocking: dispatches `thread.create` (linking the child to the caller)
    * then `thread.turn.start` (carrying `input.task` as the child's first turn).
-   * Validates `input.provider` against provider discovery; an unavailable
-   * provider fails with `SubAgentError` reason `"provider-unavailable"`. If
-   * `input.model` is omitted and the provider has no default model (e.g.
-   * `pi`), fails with reason `"model-unavailable"` instead of dispatching a
-   * thread with a null model.
+   *
+   * Governance is enforced FIRST, before any I/O, so a rejected spawn has zero
+   * side effects (Task 5.2): `caller.canSpawn === false` fails immediately with
+   * reason `"depth-limit"`; otherwise the caller's live child count (see
+   * `isLiveChildSession` in the `Layers` implementation) is checked against
+   * `SUBAGENT_MAX_LIVE_PER_ROOT`, failing with reason `"concurrency-limit"` if
+   * spawning one more would exceed it.
+   *
+   * Only then does it validate `input.provider` against provider discovery; an
+   * unavailable provider fails with `SubAgentError` reason
+   * `"provider-unavailable"`. If `input.model` is omitted and the provider has
+   * no default model (e.g. `pi`), fails with reason `"model-unavailable"`
+   * instead of dispatching a thread with a null model.
    *
    * @returns The minted child `ThreadId` as `agentId` (the wait/send/stop handle).
    */

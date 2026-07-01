@@ -37,6 +37,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationSession,
+  type OrchestrationSessionStatus,
   type OrchestrationThread,
   type ProviderKind,
   type RuntimeMode,
@@ -54,6 +55,7 @@ import { getDefaultModel } from "@t3tools/shared/model";
 import {
   clampWaitSeconds,
   SUBAGENT_DIFF_SETTLE_SECONDS,
+  SUBAGENT_MAX_LIVE_PER_ROOT,
   SUBAGENT_WAIT_MAX_SECONDS,
 } from "@t3tools/shared/subagent";
 
@@ -146,6 +148,35 @@ function resolveSubAgentModel(provider: ProviderKind, model: string | undefined)
  */
 function runtimeModeForApproval(approval: SubAgentApprovalMode | undefined): RuntimeMode {
   return approval === "auto" || approval === undefined ? "full-access" : "approval-required";
+}
+
+/**
+ * Session statuses under which a child thread's runtime is still active, for
+ * the per-root concurrency cap (Task 5.2, decision 12). This is every
+ * {@link OrchestrationSessionStatus} EXCEPT the three terminal ones --
+ * `"stopped"` | `"error"` | `"interrupted"`: a child that hasn't started
+ * running yet (`"idle"` | `"starting"`) or is actively running
+ * (`"running"` | `"ready"`) still occupies a slot. A terminal child has
+ * stopped consuming a runtime slot and is FREED from the cap the instant its
+ * session reaches one of those three statuses, regardless of how long ago
+ * that happened.
+ */
+const LIVE_CHILD_SESSION_STATUSES: ReadonlySet<OrchestrationSessionStatus> = new Set([
+  "idle",
+  "starting",
+  "running",
+  "ready",
+]);
+
+/**
+ * Whether a child thread's session still counts toward its caller's live-child
+ * concurrency cap (Task 5.2). A `null` session (no runtime has ever attached
+ * -- should not normally occur for a dispatched child, but treated the same
+ * as terminal defensively) or a terminal status does NOT count: only
+ * {@link LIVE_CHILD_SESSION_STATUSES} counts as live.
+ */
+function isLiveChildSession(session: OrchestrationSession | null): boolean {
+  return session !== null && LIVE_CHILD_SESSION_STATUSES.has(session.status);
 }
 
 /** A concise, non-empty thread title derived from the spawn's labels/task. */
@@ -532,8 +563,59 @@ export const SubAgentOrchestratorLive = Layer.effect(
 
     const spawn: SubAgentOrchestratorShape["spawn"] = (caller, input) =>
       Effect.gen(function* () {
-        // NOTE(Task 5.2): caller.canSpawn (depth-1) and concurrency limits are
-        // intentionally not enforced here yet; they land in a later task.
+        // Task 5.2, check 1 (depth-1) -- FIRST, cheap, no I/O. Defense-in-depth:
+        // the MCP layer (subagentMcp/SubAgentMcpServer.ts) already refuses to
+        // expose the spawn tool to a sub-agent thread, but the orchestrator
+        // enforces depth-1 itself too, so no other caller of `spawn` (tests,
+        // future transports) can bypass it. Checked before ANY I/O so a
+        // rejected spawn has zero side effects -- no worktree provisioning, no
+        // provider-discovery call, no dispatch.
+        if (!caller.canSpawn) {
+          return yield* Effect.fail(
+            new SubAgentError({
+              reason: "depth-limit",
+              detail: "Sub-agents cannot spawn further sub-agents (depth-1 governance limit).",
+            }),
+          );
+        }
+
+        // Task 5.2, check 2 (per-root concurrency cap) -- count the caller's
+        // LIVE children and reject before any worktree provisioning or
+        // dispatch if spawning one more would exceed
+        // SUBAGENT_MAX_LIVE_PER_ROOT. A "child" is a thread whose
+        // `parentThreadId === caller.threadId`; a child is "LIVE" when it
+        // still has an active runtime -- see `isLiveChildSession` above for
+        // the exact predicate (non-null session, non-terminal status). A
+        // child with no session, or a terminal session
+        // (`"stopped"`/`"error"`/`"interrupted"`), has already freed its slot
+        // and does NOT count -- so 5 live children lets the 6th spawn
+        // succeed, but 6 live children rejects the 7th. Counted off
+        // `ProjectionSnapshotQuery.getShellSnapshot` -- the lightest
+        // projection read whose thread rows carry both `parentThreadId` and
+        // `session.status` (`OrchestrationThreadShell`), avoiding a full
+        // detail hydration (messages/checkpoints/etc.) per candidate child.
+        const shellSnapshot = yield* projection.getShellSnapshot().pipe(
+          Effect.mapError(
+            (cause) =>
+              new SubAgentError({
+                reason: "concurrency-limit",
+                detail: "Failed to read the caller's live sub-agent count for the concurrency cap.",
+                cause,
+              }),
+          ),
+        );
+        const liveChildCount = shellSnapshot.threads.filter(
+          (thread) =>
+            thread.parentThreadId === caller.threadId && isLiveChildSession(thread.session),
+        ).length;
+        if (liveChildCount >= SUBAGENT_MAX_LIVE_PER_ROOT) {
+          return yield* Effect.fail(
+            new SubAgentError({
+              reason: "concurrency-limit",
+              detail: `Caller already has ${liveChildCount} live sub-agent(s), at the per-root cap of ${SUBAGENT_MAX_LIVE_PER_ROOT}.`,
+            }),
+          );
+        }
 
         // 1. Validate the requested provider against the existing discovery
         // layer. An unregistered/unsupported provider fails discovery; surface

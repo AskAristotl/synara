@@ -9,6 +9,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
   OrchestrationThread,
+  OrchestrationThreadShell,
   type OrchestrationProjectShell,
   ProjectId,
   type ProviderComposerCapabilities,
@@ -61,10 +62,17 @@ const decodeThread = Schema.decodeUnknownSync(OrchestrationThread);
  * `getProjectShellById` resolves to `Option.none()` when no `project` is
  * given (or the id doesn't match) rather than dying, so a test can exercise
  * the "parent project not found" failure path.
+ *
+ * `getShellSnapshot` (Task 5.2) is likewise meaningful: `spawn`'s per-root
+ * concurrency-cap check reads it unconditionally, so EVERY harness needs a
+ * working (not `unused`/dying) implementation -- it returns `shellThreads`
+ * verbatim (defaulting to `[]`, i.e. "the caller has no children yet"), which
+ * lets a spawn test control exactly which candidate children `spawn` counts.
  */
 function createProjectionStub(
   threads: ReadonlyMap<string, OrchestrationThread>,
   project?: OrchestrationProjectShell,
+  shellThreads: ReadonlyArray<OrchestrationThreadShell> = [],
 ): ProjectionSnapshotQueryShape {
   const unused = () => Effect.die(new Error("projection snapshot method unused in test"));
   const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
@@ -74,12 +82,19 @@ function createProjectionStub(
     });
   const getProjectShellById: ProjectionSnapshotQueryShape["getProjectShellById"] = (projectId) =>
     Effect.sync(() => (project && project.id === projectId ? Option.some(project) : Option.none()));
+  const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
+    Effect.sync(() => ({
+      snapshotSequence: 0,
+      projects: [],
+      threads: shellThreads,
+      updatedAt: iso(0),
+    }));
   return {
     getCommandReadModel: unused,
     getSnapshot: unused,
     getCounts: unused,
     getSnapshotSequence: unused,
-    getShellSnapshot: unused,
+    getShellSnapshot,
     getActiveProjectByWorkspaceRoot: unused,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId: unused,
@@ -468,13 +483,17 @@ function buildHarness(input: {
   readonly available: boolean;
   readonly gitCore?: GitCoreShape;
   readonly project?: OrchestrationProjectShell;
+  readonly shellThreads?: ReadonlyArray<OrchestrationThreadShell>;
 }) {
   const { engine, commands } = createRecordingEngine();
   const layer = SubAgentOrchestratorLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
     Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(input.available))),
     Layer.provide(
-      Layer.succeed(ProjectionSnapshotQuery, createProjectionStub(new Map(), input.project)),
+      Layer.succeed(
+        ProjectionSnapshotQuery,
+        createProjectionStub(new Map(), input.project, input.shellThreads),
+      ),
     ),
     Layer.provide(Layer.succeed(GitCore, input.gitCore ?? createGitCoreStub().gitCore)),
   );
@@ -490,13 +509,46 @@ const LOCAL_WORKSPACE: SubAgentSpawnCaller["workspace"] = {
 
 function makeCaller(
   workspace: SubAgentSpawnCaller["workspace"] = LOCAL_WORKSPACE,
+  canSpawn = true,
 ): SubAgentSpawnCaller {
   return {
     threadId: ThreadId.makeUnsafe(randomUUID()),
     projectId: ProjectId.makeUnsafe(randomUUID()),
     workspace,
-    canSpawn: true,
+    canSpawn,
   };
+}
+
+const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
+
+/**
+ * A minimal `OrchestrationThreadShell` for a caller's candidate child, for
+ * the Task 5.2 per-root concurrency-cap tests: `spawn`'s live-child count
+ * only reads `parentThreadId` and `session.status` off of it.
+ * `sessionStatus: null` produces a child with NO session at all (also freed,
+ * per `isLiveChildSession`); any `OrchestrationSessionStatus` string produces
+ * a session at that status.
+ */
+function makeChildShell(
+  parentThreadId: ThreadId,
+  sessionStatus: string | null,
+): OrchestrationThreadShell {
+  const id = ThreadId.makeUnsafe(randomUUID());
+  return decodeThreadShell({
+    id,
+    projectId: ProjectId.makeUnsafe(randomUUID()),
+    title: "child sub-agent",
+    modelSelection: { provider: "codex", model: "gpt-5-codex" },
+    runtimeMode: "full-access",
+    envMode: "local",
+    branch: null,
+    worktreePath: null,
+    parentThreadId,
+    latestTurn: null,
+    createdAt: iso(0),
+    updatedAt: iso(0),
+    session: sessionStatus === null ? null : makeSession(id, { status: sessionStatus }),
+  });
 }
 
 /**
@@ -1022,6 +1074,209 @@ describe("SubAgentOrchestrator.spawn (workspace:'worktree', includeWip, Task 4.2
       // createWorktree must never be reached once the snapshot step fails.
       expect(calls).toHaveLength(0);
       expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.spawn (Task 5.2: depth-1 + per-root concurrency cap)", () => {
+  it("fails with depth-limit when caller.canSpawn is false, before provider validation, worktree provisioning, or dispatch", async () => {
+    const { gitCore, calls } = createGitCoreStub();
+    const caller = makeCaller(LOCAL_WORKSPACE, false);
+    const project = makeProjectShell(caller.projectId, "/repo/root");
+    // `available: false` is the discriminating signal: if depth-1 were NOT
+    // checked first, discovery would run next and fail with
+    // "provider-unavailable" instead -- so seeing "depth-limit" here proves
+    // the depth check runs (and short-circuits) before discovery is ever
+    // reached. `workspace: "worktree"` + a resolvable `project` similarly
+    // proves worktree provisioning never runs: `calls` (createWorktree
+    // invocations) stays empty only because `spawn` returns before reaching
+    // that step.
+    const { runtime, commands } = buildHarness({ available: false, gitCore, project });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "worktree",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("depth-limit");
+      expect(commands).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("checks depth-1 BEFORE the concurrency cap: canSpawn:false still fails with depth-limit even when the cap would also be exceeded", async () => {
+    const caller = makeCaller(LOCAL_WORKSPACE, false);
+    // 6 live children -- enough to independently trigger concurrency-limit --
+    // yet the expected reason below is still depth-limit, proving check
+    // ordering (depth-1 first).
+    const shellThreads = [
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+      makeChildShell(caller.threadId, "idle"),
+      makeChildShell(caller.threadId, "starting"),
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("depth-limit");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with concurrency-limit when the caller already has 6 live children (the per-root cap)", async () => {
+    const caller = makeCaller();
+    // A mix of the 4 live statuses ("idle"|"starting"|"running"|"ready"),
+    // exercising every member of the live set, not just "running".
+    const shellThreads = [
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+      makeChildShell(caller.threadId, "idle"),
+      makeChildShell(caller.threadId, "starting"),
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(orchestrator.spawn(caller, input).pipe(Effect.flip));
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("concurrency-limit");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("succeeds when the caller has 5 live children (the 6th spawn is allowed)", async () => {
+    const caller = makeCaller();
+    const shellThreads = [
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+      makeChildShell(caller.threadId, "idle"),
+      makeChildShell(caller.threadId, "starting"),
+      makeChildShell(caller.threadId, "running"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const result = await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(result.agentId).toBeTruthy();
+      expect(commands).toHaveLength(2);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("succeeds when 3 of the caller's 6 children are terminal (stopped/error/interrupted free their slots, leaving only 3 live)", async () => {
+    const caller = makeCaller();
+    const shellThreads = [
+      makeChildShell(caller.threadId, "running"),
+      makeChildShell(caller.threadId, "ready"),
+      makeChildShell(caller.threadId, "idle"),
+      makeChildShell(caller.threadId, "stopped"),
+      makeChildShell(caller.threadId, "error"),
+      makeChildShell(caller.threadId, "interrupted"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const result = await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(result.agentId).toBeTruthy();
+      expect(commands).toHaveLength(2);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("ignores children belonging to a DIFFERENT parent -- they never count toward this caller's cap", async () => {
+    const caller = makeCaller();
+    const otherParent = ThreadId.makeUnsafe(randomUUID());
+    // 6 live children of a different thread -- would exceed the cap if
+    // wrongly attributed to `caller`, but must not affect this spawn at all.
+    const shellThreads = [
+      makeChildShell(otherParent, "running"),
+      makeChildShell(otherParent, "ready"),
+      makeChildShell(otherParent, "idle"),
+      makeChildShell(otherParent, "starting"),
+      makeChildShell(otherParent, "running"),
+      makeChildShell(otherParent, "ready"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const result = await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(result.agentId).toBeTruthy();
+      expect(commands).toHaveLength(2);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("succeeds for canSpawn:true with 0 live children (regression: existing spawn still works)", async () => {
+    const caller = makeCaller();
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [] });
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const result = await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      expect(result.agentId).toBeTruthy();
+      expect(commands).toHaveLength(2);
     } finally {
       await runtime.dispose();
     }
