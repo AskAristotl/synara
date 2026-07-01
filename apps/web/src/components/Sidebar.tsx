@@ -160,6 +160,7 @@ import { shouldRenderTerminalWorkspace } from "./ChatView.logic";
 import { CHAT_SURFACE_HEADER_HEIGHT_CLASS } from "./chat/chatHeaderControls";
 import { ProviderIcon } from "./ProviderIcon";
 import { SidebarLeadingControls } from "./SidebarHeaderNavigationControls";
+import { HostSwitcher } from "./hosts/HostSwitcher";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
 import { ThreadHoverCardContent } from "./ThreadHoverCardContent";
 import { ProjectHoverCardContent } from "./ProjectHoverCardContent";
@@ -6129,6 +6130,7 @@ export default function Sidebar() {
   const wordmark = (
     <div className="flex w-full items-center gap-1.5">
       <SidebarTrigger className="shrink-0 text-muted-foreground/75 hover:text-foreground md:hidden" />
+      <HostSwitcher />
       {headerControls}
     </div>
   );
@@ -6180,6 +6182,7 @@ export default function Sidebar() {
             )}
           >
             {titlebarControls}
+            <HostSwitcher />
           </SidebarHeader>
         </>
       ) : (
