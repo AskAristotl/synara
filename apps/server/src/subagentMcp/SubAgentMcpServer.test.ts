@@ -382,6 +382,67 @@ describe("SubAgentMcpServer", () => {
       expect(toolResult.isError).toBe(true);
       expect(toolResult.content[0]!.text).toContain("provider-unavailable");
       expect(toolResult.content[0]!.text).toContain("gemini is not installed.");
+      // Task 6.2: every SubAgentError reason gets a concise, actionable hint
+      // appended after the detail so the calling model knows what to do next
+      // (not just what failed).
+      expect(toolResult.content[0]!.text).toContain(
+        "Choose a different, available provider, or ask a human to install/configure it.",
+      );
+    });
+
+    it("appends an actionable hint for concurrency-limit tool errors", async () => {
+      const projection = createProjectionStub(new Map([[CALLER_THREAD_ID, makeCallerThread()]]));
+      const orchestrator = createOrchestratorFake({
+        spawnResult: Effect.fail(
+          new SubAgentError({
+            reason: "concurrency-limit",
+            detail: "Caller already has 6 live sub-agent(s), at the per-root cap of 6.",
+          }),
+        ),
+      });
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 18,
+          method: "tools/call",
+          params: { name: "spawn_agent", arguments: { provider: "codex", task: "x" } },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content[0]!.text).toContain("concurrency-limit");
+      expect(toolResult.content[0]!.text).toContain(
+        "Wait for or stop an existing sub-agent before spawning another.",
+      );
+    });
+
+    it("appends an actionable hint for depth-limit tool errors raised directly by the MCP layer", async () => {
+      const projection = createProjectionStub(new Map([[CALLER_THREAD_ID, makeCallerThread()]]));
+      const orchestrator = createOrchestratorFake();
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: false },
+        {
+          jsonrpc: "2.0",
+          id: 19,
+          method: "tools/call",
+          params: { name: "spawn_agent", arguments: { provider: "codex", task: "x" } },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content[0]!.text).toContain("depth-limit");
+      expect(toolResult.content[0]!.text).toContain(
+        "Do not attempt to spawn a sub-agent from here.",
+      );
     });
   });
 
@@ -444,6 +505,57 @@ describe("SubAgentMcpServer", () => {
       const toolResult = result.result as ToolCallResultShape;
       expect(toolResult.isError).toBe(true);
       expect(toolResult.content[0]!.text).toContain("unknown-agent");
+      expect(toolResult.content[0]!.text).toContain(
+        "Check that you passed an agentId returned by spawn_agent.",
+      );
+    });
+
+    // Task 6.2: a child still running when wait's timeout elapses is a VALID,
+    // re-waitable result -- orchestrator.wait resolves it as status:"running"
+    // in the SubAgentResult[] SUCCESS value (SubAgentOrchestratorLive never
+    // fails wait just because a child hasn't finished, see
+    // "Layers/SubAgentOrchestrator.ts"'s wait step 4/5 and its own
+    // "returns a running envelope on timeout instead of hanging" test). This
+    // asserts that guarantee holds all the way through the MCP transport: the
+    // JSON-RPC response must be an ordinary tool SUCCESS (isError falsy) so
+    // the calling model can read status:"running" and simply call wait again
+    // with the same agentId, rather than treating the timeout as a failure.
+    it("returns status:'running' envelopes as a tool SUCCESS (not isError) when a child times out", async () => {
+      const projection = createProjectionStub(new Map([[CALLER_THREAD_ID, makeCallerThread()]]));
+      const runningEnvelope: SubAgentResult = {
+        agentId: ThreadId.makeUnsafe("child-running"),
+        threadId: ThreadId.makeUnsafe("child-running"),
+        provider: "codex",
+        model: "gpt-5-codex",
+        status: "running",
+        finalMessage: "",
+        diff: null,
+        error: null,
+      };
+      const orchestrator = createOrchestratorFake({
+        waitResult: Effect.succeed([runningEnvelope]),
+      });
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 20,
+          method: "tools/call",
+          params: {
+            name: "wait",
+            arguments: { agentIds: ["child-running"], timeoutSeconds: 1 },
+          },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBeUndefined();
+      const parsed = JSON.parse(toolResult.content[0]!.text) as SubAgentResult[];
+      expect(parsed).toEqual([runningEnvelope]);
+      expect(parsed[0]?.status).toBe("running");
     });
   });
 
@@ -507,6 +619,9 @@ describe("SubAgentMcpServer", () => {
       const toolResult = result.result as ToolCallResultShape;
       expect(toolResult.isError).toBe(true);
       expect(toolResult.content[0]!.text).toContain("not-owner");
+      expect(toolResult.content[0]!.text).toContain(
+        "You can only call send_message/stop_agent/wait on agentIds returned by your own spawn_agent calls.",
+      );
     });
 
     it("returns a tool error (not a thrown crash) for invalid arguments", async () => {

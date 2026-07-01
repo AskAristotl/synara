@@ -20,7 +20,18 @@
  * Error convention (mirrors MCP conventions):
  * - TOOL errors (depth-limit, provider-unavailable, bad arguments, unknown
  *   tool) are a JSON-RPC RESULT with `{ content, isError: true }` — the model
- *   sees these as a normal tool response it can reason about and retry.
+ *   sees these as a normal tool response it can reason about and retry. Text
+ *   is `Sub-agent operation failed (<reason>): <detail> <hint>` — `detail`
+ *   comes from `SubAgentError` (states what failed, often naming the
+ *   specific provider/agentId/count); `hint` (Task 6.2, `SUBAGENT_ERROR_HINTS`
+ *   below) is a short, reason-specific "what to do about it" sentence so the
+ *   calling model has an actionable next step, not just a failure reason.
+ * - A `wait` call whose timeout elapses before every requested child reaches
+ *   a terminal state is NOT a tool error: still-running children come back
+ *   as ordinary envelopes with `status:"running"` inside a normal (non-error)
+ *   tool result, so the model can simply call `wait` again with the same
+ *   `agentId` (Task 6.2; enforced by `SubAgentOrchestrator.wait`'s own error
+ *   channel never firing on a timeout — see `Layers/SubAgentOrchestrator.ts`).
  * - PROTOCOL errors (malformed JSON-RPC envelope, unknown method) are a
  *   JSON-RPC error object (`{ error: { code, message } }`).
  *
@@ -50,6 +61,7 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
   SubAgentError,
+  type SubAgentErrorReason,
   SubAgentOrchestrator,
   type SubAgentSpawnCaller,
 } from "../orchestration/Services/SubAgentOrchestrator.ts";
@@ -286,10 +298,52 @@ function toolSuccessResult(value: unknown): McpToolCallResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** `reason` mirrors {@link SubAgentError}'s `reason` discriminant so tool-error text stays greppable. */
+/**
+ * Task 6.2: a short, concrete "what do I do now" sentence per
+ * {@link SubAgentErrorReason}, appended after `detail` in {@link toolErrorResult}.
+ * `detail` (built by `SubAgentError`'s constructors in
+ * `Layers/SubAgentOrchestrator.ts`) already states WHAT failed, often with the
+ * specific provider/agentId/count involved; this table adds WHAT TO DO about
+ * it, since the tool result is read by a model deciding its next tool call,
+ * not a human debugging a log line. Keyed by the full `SubAgentErrorReason`
+ * union (not just the subset the task brief calls out) so adding a new reason
+ * to that union is a compile error here until a hint is written for it.
+ */
+const SUBAGENT_ERROR_HINTS: Readonly<Record<SubAgentErrorReason, string>> = {
+  "provider-unavailable":
+    "Choose a different, available provider, or ask a human to install/configure it.",
+  "model-unavailable": "Retry with an explicit 'model' argument for this provider.",
+  "dispatch-failed": "This is likely a transient orchestration failure; you may retry.",
+  "unknown-agent": "Check that you passed an agentId returned by spawn_agent.",
+  "wait-failed": "This is likely a transient read failure; retry the wait call.",
+  "worktree-failed": "Retry, or spawn with workspace:'share' instead of 'worktree'.",
+  "depth-limit": "Do not attempt to spawn a sub-agent from here.",
+  "concurrency-limit": "Wait for or stop an existing sub-agent before spawning another.",
+  "stop-failed": "This is likely a transient failure; you may retry stop_agent.",
+  "not-owner":
+    "You can only call send_message/stop_agent/wait on agentIds returned by your own spawn_agent calls.",
+};
+
+function hintForReason(reason: string): string | undefined {
+  return Object.hasOwn(SUBAGENT_ERROR_HINTS, reason)
+    ? SUBAGENT_ERROR_HINTS[reason as SubAgentErrorReason]
+    : undefined;
+}
+
+/**
+ * `reason` mirrors {@link SubAgentError}'s `reason` discriminant so tool-error
+ * text stays greppable. Also accepts the handful of MCP-layer-only reasons
+ * that never reach `SubAgentError` (`invalid-arguments`, `caller-unresolved`,
+ * `unknown-tool`) -- those fall through with no hint suffix, unchanged from
+ * before Task 6.2.
+ */
 function toolErrorResult(reason: string, detail: string): McpToolCallResult {
+  const hint = hintForReason(reason);
+  const text = hint
+    ? `Sub-agent operation failed (${reason}): ${detail} ${hint}`
+    : `Sub-agent operation failed (${reason}): ${detail}`;
   return {
-    content: [{ type: "text", text: `Sub-agent operation failed (${reason}): ${detail}` }],
+    content: [{ type: "text", text }],
     isError: true,
   };
 }
