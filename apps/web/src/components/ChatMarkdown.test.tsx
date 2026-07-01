@@ -17,6 +17,13 @@ vi.mock("../hooks/useTheme", () => ({
   useTheme: () => ({ resolvedTheme: "light" }),
 }));
 
+vi.mock("../lib/mermaidRendering", () => ({
+  resolveMermaidTheme: () => "default",
+  createMermaidCacheKey: () => "key",
+  getCachedMermaidSvg: () => '<svg class="mermaid-mock">diagram</svg>',
+  getMermaidSvgPromise: () => new Promise(() => {}),
+}));
+
 async function renderMarkdown(
   text: string,
   cwd = "C:\\Users\\LENOVO\\dpcode",
@@ -245,5 +252,17 @@ describe("ChatMarkdown", () => {
     expect(proposedPlanCardSource).toContain("<ChatMarkdown");
     expect(messagesTimelineSource).toContain('import ChatMarkdown from "../ChatMarkdown"');
     expect(messagesTimelineSource).toContain("<ChatMarkdown");
+  });
+
+  it("routes a mermaid fence to the diagram component", async () => {
+    const markup = await renderMarkdown("```mermaid\ngraph TD;A-->B\n```");
+    expect(markup).toContain("chat-markdown-mermaid");
+    expect(markup).toContain("mermaid-mock");
+  });
+
+  it("still routes non-mermaid fences to the code block", async () => {
+    const markup = await renderMarkdown("```ts\nconst x = 1;\n```");
+    expect(markup).not.toContain("chat-markdown-mermaid");
+    expect(markup).toContain("chat-markdown-codeblock");
   });
 });
