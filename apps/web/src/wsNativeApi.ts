@@ -576,6 +576,11 @@ export function createWsNativeApi(
           method: "POST",
           ...(input ? { body: input } : {}),
         }),
+      createAuthPairingUrl: (input?: { label?: string }) =>
+        connection.requestAuthJson<{ url: string }>("/api/auth/pairing-url", {
+          method: "POST",
+          ...(input ? { body: input } : {}),
+        }),
       listAuthPairingLinks: () =>
         connection.requestAuthJson<ReadonlyArray<AuthPairingLink>>("/api/auth/pairing-links"),
       revokeAuthPairingLink: (input: AuthRevokePairingLinkInput) =>

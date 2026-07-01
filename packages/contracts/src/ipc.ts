@@ -499,6 +499,7 @@ export interface NativeApi {
     createAuthPairingToken: (
       input?: AuthCreatePairingCredentialInput,
     ) => Promise<AuthPairingCredentialResult>;
+    createAuthPairingUrl: (input?: { label?: string }) => Promise<{ url: string }>;
     listAuthPairingLinks: () => Promise<ReadonlyArray<AuthPairingLink>>;
     revokeAuthPairingLink: (input: AuthRevokePairingLinkInput) => Promise<{ revoked: boolean }>;
     listAuthClients: () => Promise<ReadonlyArray<AuthClientSession>>;
