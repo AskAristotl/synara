@@ -52,6 +52,7 @@ import {
   type SidebarThreadSummary,
   type Thread,
 } from "../types";
+import { resolveSubagentPresentationForThread } from "../lib/subagentPresentation";
 
 function makeLatestTurn(overrides?: {
   completedAt?: string | null;
@@ -991,6 +992,58 @@ describe("buildProjectThreadTree", () => {
       [ThreadId.makeUnsafe("thread-child"), 1, true],
       [ThreadId.makeUnsafe("thread-grandchild"), 2, false],
     ]);
+  });
+
+  // Task 7.2: locks in that a spawned sub-agent thread renders nested directly beneath its
+  // parent (not as a flat, unrelated sibling elsewhere in the list) and that it carries its
+  // sub-agent presentation (nickname/role) once nested. Regressing either buildProjectThreadTree's
+  // grouping or resolveSubagentPresentationForThread's metadata resolution should fail this test.
+  it("nests a sub-agent thread directly under its parent and carries its presentation", () => {
+    const parentId = ThreadId.makeUnsafe("thread-parent");
+    const childId = ThreadId.makeUnsafe("thread-child");
+    const unrelatedRootId = ThreadId.makeUnsafe("thread-unrelated");
+
+    const parent = makeThread({
+      id: parentId,
+      title: "Root conversation",
+      createdAt: "2026-03-09T10:03:00.000Z",
+    });
+    const child = makeThread({
+      id: childId,
+      parentThreadId: parentId,
+      subagentAgentId: "agent-42",
+      subagentNickname: "Halley",
+      subagentRole: "researcher",
+      title: "Subagent",
+      createdAt: "2026-03-09T10:02:00.000Z",
+    });
+    // An unrelated root-level thread that sorts between the parent and child threads, so the
+    // assertion below would fail if the child were flattened as a sibling instead of nested.
+    const unrelatedRoot = makeThread({
+      id: unrelatedRootId,
+      title: "Unrelated conversation",
+      createdAt: "2026-03-09T10:02:30.000Z",
+    });
+
+    const rows = buildProjectThreadTree({
+      threads: [parent, child, unrelatedRoot],
+      expandedParentThreadIds: new Set([parentId]),
+    });
+
+    expect(rows.map((row) => [row.thread.id, row.depth, row.rootThreadId])).toEqual([
+      [parentId, 0, parentId],
+      [childId, 1, parentId],
+      [unrelatedRootId, 0, unrelatedRootId],
+    ]);
+    expect(rows[0]).toMatchObject({ childCount: 1, isExpanded: true });
+
+    const childRow = rows.find((row) => row.thread.id === childId);
+    const presentation = resolveSubagentPresentationForThread({
+      thread: childRow?.thread ?? child,
+    });
+    expect(presentation.nickname).toBe("Halley");
+    expect(presentation.role).toBe("researcher");
+    expect(presentation.primaryLabel).toBe("Halley");
   });
 });
 
