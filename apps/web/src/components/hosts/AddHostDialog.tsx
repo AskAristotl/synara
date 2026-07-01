@@ -3,7 +3,7 @@
 // Purpose: Paste-a-pairing-link dialog to add a remote host (desktop + mobile).
 // Layer: Web component
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { redeemPairingLink } from "../../hosts/pairing";
 import { switchActiveHost } from "../../hosts/switchActiveHost";
@@ -30,6 +30,16 @@ export function AddHostDialog({ open, onOpenChange }: AddHostDialogProps) {
   const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Clear stale state left over from a cancelled or failed attempt so a reopen starts clean.
+  useEffect(() => {
+    if (!open) {
+      setLink("");
+      setLabel("");
+      setError(null);
+      setBusy(false);
+    }
+  }, [open]);
 
   const submit = async () => {
     const validation = validateAddHostInput(link);

@@ -7,6 +7,7 @@ import type { ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { randomUUID } from "./lib/utils";
 import {
   type OpenPaneInput,
@@ -115,6 +116,11 @@ export const useRightDockStore = create<RightDockStore>()(
       }),
     },
   ),
+);
+
+// Reset on host switch — dock state is keyed by threads that only exist on one host.
+registerHostScopedReset(() =>
+  useRightDockStore.setState(useRightDockStore.getInitialState(), true),
 );
 
 export function selectRightDockState(threadId: ThreadId) {

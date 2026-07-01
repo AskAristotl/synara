@@ -1,6 +1,7 @@
 import type { ProjectId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 const LATEST_PROJECT_STORAGE_KEY = "synara:latest-project:v1";
 
@@ -41,4 +42,9 @@ export const useLatestProjectStore = create<LatestProjectStore>()(
       },
     },
   ),
+);
+
+// Reset on host switch — the latest project id references one host's projects.
+registerHostScopedReset(() =>
+  useLatestProjectStore.setState(useLatestProjectStore.getInitialState(), true),
 );

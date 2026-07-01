@@ -6,6 +6,7 @@
 import type { ThreadId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import {
   type RecentView,
   type RecentViewAvailability,
@@ -125,4 +126,9 @@ export const useRecentViewsStore = create<RecentViewsStoreState>()(
       },
     },
   ),
+);
+
+// Reset on host switch — recent views reference threads/workspaces that only exist on one host.
+registerHostScopedReset(() =>
+  useRecentViewsStore.setState(useRecentViewsStore.getInitialState(), true),
 );

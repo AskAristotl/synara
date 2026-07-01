@@ -68,6 +68,7 @@ import { cloneComposerImageAttachment } from "./lib/composerSend";
 import { buildModelSelection } from "./providerModelOptions";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "synara:composer-drafts:v1";
@@ -4201,6 +4202,11 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
       },
     },
   ),
+);
+
+// Reset on host switch — drafts, queued turns, and draft threads reference one host's projects/threads.
+registerHostScopedReset(() =>
+  useComposerDraftStore.setState(useComposerDraftStore.getInitialState(), true),
 );
 
 export function useComposerThreadDraft(threadId: ThreadId): ComposerThreadDraftState {

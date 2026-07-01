@@ -55,9 +55,9 @@ function formatClientLabel(client: AuthClientSession): string {
 function formatLastSeen(client: AuthClientSession): string {
   if (client.connected) return "Connected now";
   const lastSeen = toDateOrNull(client.lastConnectedAt);
-  return lastSeen
-    ? `Last seen ${formatRelativeTime(lastSeen.toISOString())} ago`
-    : "Never connected";
+  if (!lastSeen) return "Never connected";
+  const relative = formatRelativeTime(lastSeen.toISOString());
+  return relative === "now" ? "Last seen just now" : `Last seen ${relative} ago`;
 }
 
 function errorMessage(error: unknown, fallback: string): string {

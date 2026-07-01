@@ -7,6 +7,7 @@ import type { ThreadId, TurnId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { ChatRightPanel } from "./diffRouteSearch";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 import { isPlainObject, sanitizeStringKeyedRecord } from "./persistedRecord";
 
 export interface SingleChatPanelState {
@@ -115,6 +116,11 @@ export const useSingleChatPanelStore = create<SingleChatPanelStore>()(
       }),
     },
   ),
+);
+
+// Reset on host switch — single-chat panel state is keyed by threads that only exist on one host.
+registerHostScopedReset(() =>
+  useSingleChatPanelStore.setState(useSingleChatPanelStore.getInitialState(), true),
 );
 
 export function selectSingleChatPanelState(threadId: ThreadId) {

@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import type { KanbanOptimisticDispatchSnapshot } from "./components/kanban/kanban.logic";
+import { registerHostScopedReset } from "./hosts/hostScopedStores";
 
 interface KanbanUiStoreState {
   /** Manual order of draft-column card ids per project, captured after a drag. */
@@ -151,3 +152,6 @@ export const useKanbanUiStore = create<KanbanUiStoreState>()(
     },
   ),
 );
+
+// Reset on host switch — draft order and optimistic dispatch reference one host's projects/threads.
+registerHostScopedReset(() => useKanbanUiStore.setState(useKanbanUiStore.getInitialState(), true));
