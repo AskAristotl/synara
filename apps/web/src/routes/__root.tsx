@@ -57,6 +57,7 @@ import {
   onServerSettingsUpdated,
   onServerWelcome,
 } from "../wsNativeApi";
+import { addWsTransportStateListener } from "../wsTransportEvents";
 import { providerQueryKeys } from "../lib/providerReactQuery";
 import { invalidateProjectFileQueriesForCwds, projectQueryKeys } from "../lib/projectReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
@@ -1250,6 +1251,21 @@ function EventRouter() {
         invalidateLocalServers();
       })
       .catch(() => undefined);
+    // Live invalidation events that fired while we were disconnected are gone
+    // forever. Orchestration state heals via snapshot-on-subscribe, but the
+    // react-query caches (git status, file trees, provider state) must be
+    // refetched wholesale after a reconnect.
+    let transportSawDisconnect = false;
+    const removeTransportStateListener = addWsTransportStateListener((state) => {
+      if (state === "closed" || state === "connecting") {
+        transportSawDisconnect = true;
+        return;
+      }
+      if (state === "open" && transportSawDisconnect) {
+        transportSawDisconnect = false;
+        void queryClient.invalidateQueries();
+      }
+    });
     const unsubWelcome = onServerWelcome((payload) => {
       void (async () => {
         setServerWorkspacePaths({
@@ -1410,6 +1426,7 @@ function EventRouter() {
       unsubThreadEvent();
       unsubTerminalEvent();
       unsubDevServerEvent();
+      removeTransportStateListener();
       unsubWelcome();
       unsubServerConfigUpdated();
       unsubProviderStatusesUpdated();
