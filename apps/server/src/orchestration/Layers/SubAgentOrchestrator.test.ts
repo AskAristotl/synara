@@ -13,7 +13,9 @@ import {
   type OrchestrationProjectShell,
   ProjectId,
   type ProviderComposerCapabilities,
+  SubAgentSendMessageInput,
   SubAgentSpawnInput,
+  SubAgentStopInput,
   SubAgentWaitInput,
   ThreadId,
   TurnId,
@@ -50,6 +52,8 @@ import { SubAgentOrchestratorLive } from "./SubAgentOrchestrator.ts";
 
 const decodeSpawnInput = Schema.decodeUnknownSync(SubAgentSpawnInput);
 const decodeWaitInput = Schema.decodeUnknownSync(SubAgentWaitInput);
+const decodeSendMessageInput = Schema.decodeUnknownSync(SubAgentSendMessageInput);
+const decodeStopInput = Schema.decodeUnknownSync(SubAgentStopInput);
 const decodeThread = Schema.decodeUnknownSync(OrchestrationThread);
 
 /**
@@ -89,6 +93,15 @@ function createProjectionStub(
       threads: shellThreads,
       updatedAt: iso(0),
     }));
+  // Task 6.1: `assertOwnership` (sendMessage/stopAgent) reads a target
+  // sub-agent's shell row by id -- resolved off the SAME `shellThreads` array
+  // the per-root concurrency cap (Task 5.2) already seeds, so a test wires
+  // ownership state the same way it wires live-child state.
+  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
+    Effect.sync(() => {
+      const shell = shellThreads.find((thread) => thread.id === threadId);
+      return shell ? Option.some(shell) : Option.none();
+    });
   return {
     getCommandReadModel: unused,
     getSnapshot: unused,
@@ -100,7 +113,7 @@ function createProjectionStub(
     getFirstActiveThreadIdByProjectId: unused,
     getThreadCheckpointContext: unused,
     getFullThreadDiffContext: unused,
-    getThreadShellById: unused,
+    getThreadShellById,
     findSyntheticSubagentParentThread: unused,
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
@@ -2115,6 +2128,139 @@ describe("SubAgentOrchestrator.wait (worktree checkpoint settle, Task 4.3b)", ()
       expect(results[0]?.status).toBe("completed");
       expect(results[0]?.diff).toBeNull();
       expect(elapsedMs).toBeLessThan(500);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.sendMessage (Task 6.1)", () => {
+  it("dispatches a thread.turn.start carrying the task for a child the caller owns", async () => {
+    const caller = makeCaller();
+    const childShell = makeChildShell(caller.threadId, "idle");
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [childShell] });
+    const input = decodeSendMessageInput({ agentId: childShell.id, task: "keep going" });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.sendMessage({ threadId: caller.threadId }, input));
+
+      expect(commands).toHaveLength(1);
+      const turnCommand = commands[0];
+      if (turnCommand?.type !== "thread.turn.start") {
+        throw new Error("expected the dispatched command to be thread.turn.start");
+      }
+      expect(turnCommand.threadId).toBe(childShell.id);
+      expect(turnCommand.message.text).toBe("keep going");
+      expect(turnCommand.modelSelection).toEqual(childShell.modelSelection);
+      expect(turnCommand.runtimeMode).toBe(childShell.runtimeMode);
+      expect(turnCommand.dispatchMode).toBe("queue");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with not-owner and dispatches nothing when the target thread's parentThreadId does not match the caller", async () => {
+    const caller = makeCaller();
+    const otherParent = ThreadId.makeUnsafe(randomUUID());
+    const childShell = makeChildShell(otherParent, "idle");
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [childShell] });
+    const input = decodeSendMessageInput({ agentId: childShell.id, task: "keep going" });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator.sendMessage({ threadId: caller.threadId }, input).pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with not-owner and dispatches nothing when the target agentId has no backing thread", async () => {
+    const caller = makeCaller();
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [] });
+    const input = decodeSendMessageInput({
+      agentId: ThreadId.makeUnsafe(randomUUID()),
+      task: "keep going",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator.sendMessage({ threadId: caller.threadId }, input).pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.stopAgent (Task 6.1)", () => {
+  it("dispatches thread.session.stop for a child the caller owns", async () => {
+    const caller = makeCaller();
+    const childShell = makeChildShell(caller.threadId, "running");
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [childShell] });
+    const input = decodeStopInput({ agentId: childShell.id });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.stopAgent({ threadId: caller.threadId }, input));
+
+      expect(commands).toHaveLength(1);
+      const stopCommand = commands[0];
+      if (stopCommand?.type !== "thread.session.stop") {
+        throw new Error("expected the dispatched command to be thread.session.stop");
+      }
+      expect(stopCommand.threadId).toBe(childShell.id);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with not-owner and stops nothing when the target thread's parentThreadId does not match the caller", async () => {
+    const caller = makeCaller();
+    const otherParent = ThreadId.makeUnsafe(randomUUID());
+    const childShell = makeChildShell(otherParent, "running");
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [childShell] });
+    const input = decodeStopInput({ agentId: childShell.id });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator.stopAgent({ threadId: caller.threadId }, input).pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("fails with not-owner and stops nothing when the target agentId has no backing thread", async () => {
+    const caller = makeCaller();
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [] });
+    const input = decodeStopInput({ agentId: ThreadId.makeUnsafe(randomUUID()) });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const error = await runtime.runPromise(
+        orchestrator.stopAgent({ threadId: caller.threadId }, input).pipe(Effect.flip),
+      );
+
+      expect(error).toBeInstanceOf(SubAgentError);
+      expect(error.reason).toBe("not-owner");
+      expect(commands).toHaveLength(0);
     } finally {
       await runtime.dispose();
     }

@@ -4,7 +4,9 @@ import {
   OrchestrationThread,
   ProjectId,
   type SubAgentResult,
+  type SubAgentSendMessageInput,
   type SubAgentSpawnInput,
+  type SubAgentStopInput,
   type SubAgentWaitInput,
   ThreadId,
 } from "@t3tools/contracts";
@@ -16,6 +18,7 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
+  type SubAgentCaller,
   SubAgentError,
   SubAgentOrchestrator,
   type SubAgentOrchestratorShape,
@@ -102,6 +105,14 @@ interface OrchestratorFake {
     readonly input: SubAgentSpawnInput;
   }>;
   readonly waitCalls: SubAgentWaitInput[];
+  readonly sendMessageCalls: Array<{
+    readonly caller: SubAgentCaller;
+    readonly input: SubAgentSendMessageInput;
+  }>;
+  readonly stopAgentCalls: Array<{
+    readonly caller: SubAgentCaller;
+    readonly input: SubAgentStopInput;
+  }>;
 }
 
 /** A fake SubAgentOrchestrator that records every call and returns canned results. */
@@ -109,10 +120,14 @@ function createOrchestratorFake(
   opts: {
     readonly spawnResult?: Effect.Effect<{ agentId: ThreadId }, SubAgentError>;
     readonly waitResult?: Effect.Effect<readonly SubAgentResult[], SubAgentError>;
+    readonly sendMessageResult?: Effect.Effect<void, SubAgentError>;
+    readonly stopAgentResult?: Effect.Effect<void, SubAgentError>;
   } = {},
 ): OrchestratorFake {
   const spawnCalls: OrchestratorFake["spawnCalls"] = [];
   const waitCalls: SubAgentWaitInput[] = [];
+  const sendMessageCalls: OrchestratorFake["sendMessageCalls"] = [];
+  const stopAgentCalls: OrchestratorFake["stopAgentCalls"] = [];
   const spawn: SubAgentOrchestratorShape["spawn"] = (caller, input) => {
     spawnCalls.push({ caller, input });
     return opts.spawnResult ?? Effect.succeed({ agentId: ThreadId.makeUnsafe("child-thread-1") });
@@ -121,15 +136,24 @@ function createOrchestratorFake(
     waitCalls.push(input);
     return opts.waitResult ?? Effect.succeed([]);
   };
-  // Task 5.3: `stop`/`cascadeStopChildren` are not exercised by
-  // SubAgentMcpServer (the `stop_agent` MCP tool is a later task, per the
-  // Services/SubAgentOrchestrator.ts doc comment) -- unused here, mirrors
-  // the `unused` pattern for untouched ProjectionSnapshotQuery members above.
+  const sendMessage: SubAgentOrchestratorShape["sendMessage"] = (caller, input) => {
+    sendMessageCalls.push({ caller, input });
+    return opts.sendMessageResult ?? Effect.void;
+  };
+  const stopAgent: SubAgentOrchestratorShape["stopAgent"] = (caller, input) => {
+    stopAgentCalls.push({ caller, input });
+    return opts.stopAgentResult ?? Effect.void;
+  };
+  // `cascadeStopChildren` is not exercised by SubAgentMcpServer -- unused
+  // here, mirrors the `unused` pattern for untouched ProjectionSnapshotQuery
+  // members above.
   const unused = () => Effect.die(new Error("SubAgentOrchestrator method unused in test"));
   return {
-    shape: { spawn, wait, stop: unused, cascadeStopChildren: unused },
+    shape: { spawn, wait, sendMessage, stopAgent, stop: unused, cascadeStopChildren: unused },
     spawnCalls,
     waitCalls,
+    sendMessageCalls,
+    stopAgentCalls,
   };
 }
 
@@ -196,7 +220,7 @@ describe("SubAgentMcpServer", () => {
   });
 
   describe("tools/list", () => {
-    it("returns exactly spawn_agent and wait, each with a non-empty inputSchema", async () => {
+    it("returns exactly spawn_agent, wait, send_message, and stop_agent, each with a non-empty inputSchema", async () => {
       const projection = createProjectionStub(new Map());
       const orchestrator = createOrchestratorFake();
 
@@ -214,7 +238,12 @@ describe("SubAgentMcpServer", () => {
           inputSchema: Record<string, unknown>;
         }>;
       };
-      expect(tools.map((tool) => tool.name).toSorted()).toEqual(["spawn_agent", "wait"]);
+      expect(tools.map((tool) => tool.name).toSorted()).toEqual([
+        "send_message",
+        "spawn_agent",
+        "stop_agent",
+        "wait",
+      ]);
       for (const tool of tools) {
         expect(tool.description.length).toBeGreaterThan(0);
         expect(Object.keys(tool.inputSchema).length).toBeGreaterThan(0);
@@ -415,6 +444,167 @@ describe("SubAgentMcpServer", () => {
       const toolResult = result.result as ToolCallResultShape;
       expect(toolResult.isError).toBe(true);
       expect(toolResult.content[0]!.text).toContain("unknown-agent");
+    });
+  });
+
+  describe("tools/call send_message", () => {
+    it("calls orchestrator.sendMessage with the caller from the token and returns an ok result", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake();
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 12,
+          method: "tools/call",
+          params: {
+            name: "send_message",
+            arguments: { agentId: "child-abc", task: "keep going" },
+          },
+        },
+      );
+
+      expect(orchestrator.sendMessageCalls).toHaveLength(1);
+      const call = orchestrator.sendMessageCalls[0]!;
+      expect(call.caller).toEqual({ threadId: CALLER_THREAD_ID, canSpawn: true });
+      expect(call.input.agentId).toBe("child-abc");
+      expect(call.input.task).toBe("keep going");
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBeUndefined();
+      expect(JSON.parse(toolResult.content[0]!.text)).toEqual({ ok: true });
+    });
+
+    it("returns a not-owner tool error when orchestrator.sendMessage rejects ownership", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake({
+        sendMessageResult: Effect.fail(
+          new SubAgentError({
+            reason: "not-owner",
+            detail: "Sub-agent 'child-abc' is not a child of the calling session.",
+          }),
+        ),
+      });
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 13,
+          method: "tools/call",
+          params: {
+            name: "send_message",
+            arguments: { agentId: "child-abc", task: "keep going" },
+          },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content[0]!.text).toContain("not-owner");
+    });
+
+    it("returns a tool error (not a thrown crash) for invalid arguments", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake();
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 14,
+          method: "tools/call",
+          params: { name: "send_message", arguments: { agentId: "child-abc", task: "" } },
+        },
+      );
+
+      expect(orchestrator.sendMessageCalls).toHaveLength(0);
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+    });
+  });
+
+  describe("tools/call stop_agent", () => {
+    it("calls orchestrator.stopAgent with the caller from the token and returns an ok result", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake();
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 15,
+          method: "tools/call",
+          params: { name: "stop_agent", arguments: { agentId: "child-abc" } },
+        },
+      );
+
+      expect(orchestrator.stopAgentCalls).toHaveLength(1);
+      const call = orchestrator.stopAgentCalls[0]!;
+      expect(call.caller).toEqual({ threadId: CALLER_THREAD_ID, canSpawn: true });
+      expect(call.input.agentId).toBe("child-abc");
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBeUndefined();
+      expect(JSON.parse(toolResult.content[0]!.text)).toEqual({ ok: true });
+    });
+
+    it("returns a not-owner tool error when orchestrator.stopAgent rejects ownership", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake({
+        stopAgentResult: Effect.fail(
+          new SubAgentError({
+            reason: "not-owner",
+            detail: "Sub-agent 'child-abc' is not a child of the calling session.",
+          }),
+        ),
+      });
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 16,
+          method: "tools/call",
+          params: { name: "stop_agent", arguments: { agentId: "child-abc" } },
+        },
+      );
+
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content[0]!.text).toContain("not-owner");
+    });
+
+    it("returns a tool error (not a thrown crash) for invalid arguments", async () => {
+      const projection = createProjectionStub(new Map());
+      const orchestrator = createOrchestratorFake();
+
+      const response = await runHandle(
+        { orchestrator: orchestrator.shape, projection },
+        { threadId: CALLER_THREAD_ID, canSpawn: true },
+        {
+          jsonrpc: "2.0",
+          id: 17,
+          method: "tools/call",
+          params: { name: "stop_agent", arguments: {} },
+        },
+      );
+
+      expect(orchestrator.stopAgentCalls).toHaveLength(0);
+      const result = Option.getOrThrow(response) as JsonRpcSuccessResponse;
+      const toolResult = result.result as ToolCallResultShape;
+      expect(toolResult.isError).toBe(true);
     });
   });
 

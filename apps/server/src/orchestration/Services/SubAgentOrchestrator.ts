@@ -21,7 +21,9 @@
 import type {
   ProjectId,
   SubAgentResult,
+  SubAgentSendMessageInput,
   SubAgentSpawnInput,
+  SubAgentStopInput,
   SubAgentWaitInput,
   ThreadEnvironmentMode,
   ThreadId,
@@ -62,7 +64,15 @@ import type { Effect } from "effect";
  * (`cascadeStopChildren`'s `ProjectionSnapshotQuery.getShellSnapshot` read)
  * -- a per-child dispatch failure inside `stop`/`cascadeStopChildren` still
  * surfaces as `"dispatch-failed"` (the same `toDispatchError` mapping
- * `spawn` uses for its own command dispatches).
+ * `spawn` uses for its own command dispatches). `"not-owner"` (Task 6.1) is
+ * `sendMessage`/`stopAgent`'s governance failure: the target `agentId` either
+ * has no backing thread, or its `parentThreadId` does not match the calling
+ * session's `threadId` -- see `assertOwnership` in
+ * `Layers/SubAgentOrchestrator.ts`, which both methods run FIRST, before any
+ * dispatch, so a rejected call has zero side effects. An infra failure while
+ * resolving the target for that ownership check also surfaces as
+ * `"not-owner"` (fail closed: ownership cannot be confirmed, so the call
+ * cannot proceed) rather than introducing a separate reason for it.
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
@@ -74,6 +84,7 @@ export const SubAgentErrorReason = Schema.Literals([
   "depth-limit",
   "concurrency-limit",
   "stop-failed",
+  "not-owner",
 ]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 
@@ -120,9 +131,22 @@ export interface SubAgentSpawnCaller {
 }
 
 /**
+ * SubAgentCaller - Minimal caller identity for `sendMessage`/`stopAgent` (Task
+ * 6.1). Unlike {@link SubAgentSpawnCaller}, these two methods only ever need
+ * the caller's own `threadId` -- to check that the target `agentId` is one of
+ * ITS children (`assertOwnership` in `Layers/SubAgentOrchestrator.ts`) --
+ * never `projectId`/`workspace`/`canSpawn` (those exist purely to build a
+ * NEW child in `spawn`). `SessionTokenIdentity`
+ * (`subagentMcp/SessionTokenRegistry.ts`) satisfies this structurally, so the
+ * MCP layer passes it straight through with no extra resolution step (unlike
+ * `spawn`, which must hydrate `SubAgentSpawnCaller` from the projection).
+ */
+export interface SubAgentCaller {
+  readonly threadId: ThreadId;
+}
+
+/**
  * SubAgentOrchestratorShape - Service API for cross-model sub-agent lifecycle.
- *
- * `sendMessage` is added by a later task.
  */
 export interface SubAgentOrchestratorShape {
   /**
@@ -173,6 +197,53 @@ export interface SubAgentOrchestratorShape {
   ) => Effect.Effect<readonly SubAgentResult[], SubAgentError>;
 
   /**
+   * Start a follow-up turn on a child the caller already spawned (Task 6.1,
+   * design decision 11's `send_message`).
+   *
+   * Ownership is enforced FIRST, before any dispatch (`assertOwnership` in
+   * `Layers/SubAgentOrchestrator.ts`): `input.agentId` must be a thread whose
+   * `parentThreadId === caller.threadId`, or this fails with `SubAgentError`
+   * reason `"not-owner"` and dispatches nothing -- a caller can only message
+   * a child it spawned itself, never an arbitrary thread id or another
+   * caller's child.
+   *
+   * Once ownership is confirmed, dispatches a `thread.turn.start` for
+   * `input.agentId` carrying `input.task` as the message text -- the SAME
+   * command shape `spawn` uses for a child's FIRST turn (fresh `CommandId`/
+   * `MessageId`, `dispatchMode: "queue"`, the child's own `modelSelection`/
+   * `runtimeMode`/`interactionMode`), so this is indistinguishable from any
+   * other turn on the child's own timeline. `dispatchMode: "queue"` means a
+   * child that is still mid-turn queues this follow-up rather than rejecting
+   * it -- the caller does not need to `wait` for the child to go idle before
+   * calling `sendMessage`.
+   *
+   * Non-blocking, like `spawn`: call `wait` again with the same `agentId` to
+   * block until the follow-up turn finishes.
+   */
+  readonly sendMessage: (
+    caller: SubAgentCaller,
+    input: SubAgentSendMessageInput,
+  ) => Effect.Effect<void, SubAgentError>;
+
+  /**
+   * Stop a child the caller already spawned (Task 6.1, design decision 11's
+   * `stop_agent`).
+   *
+   * Ownership is enforced FIRST, before any dispatch (`assertOwnership`,
+   * same check `sendMessage` uses): `input.agentId` must be a thread whose
+   * `parentThreadId === caller.threadId`, or this fails with `SubAgentError`
+   * reason `"not-owner"` and stops nothing.
+   *
+   * Once ownership is confirmed, delegates to the caller-agnostic `stop`
+   * below -- see that method's doc comment for exactly what a session-stop
+   * does (and does not) do to the child.
+   */
+  readonly stopAgent: (
+    caller: SubAgentCaller,
+    input: SubAgentStopInput,
+  ) => Effect.Effect<void, SubAgentError>;
+
+  /**
    * Stop a single child's session (Task 5.3).
    *
    * Dispatches `ThreadSessionStopCommand` for `agentId` and nothing else --
@@ -184,8 +255,11 @@ export interface SubAgentOrchestratorShape {
    * `ProviderCommandReactor` routing -- it would target the child's PARENT
    * session, not the child's own).
    *
-   * Caller-agnostic: performs no ownership/authorization check. Task 6.1
-   * adds the `stop_agent` MCP tool and its ownership check on top of this.
+   * Caller-agnostic: performs no ownership/authorization check itself --
+   * `stopAgent` above (Task 6.1) is the ownership-checked entry point the
+   * `stop_agent` MCP tool calls; `cascadeStopChildren` below calls this raw
+   * `stop` directly (it has already enumerated LIVE CHILDREN of a known
+   * parent, so re-deriving ownership per child would be redundant).
    * Stopping an already-terminal (or unknown) `agentId` is a safe no-op:
    * `thread.session.stop` only requires the thread to exist, and re-stopping
    * an already-stopped session is idempotent at the decider/reactor level.

@@ -8,10 +8,14 @@
  * (`httpTransport.ts`) resolves a bearer token to a caller identity via
  * `SessionTokenRegistry` and forwards the parsed JSON body here.
  *
- * Registers exactly two tools in this task: `spawn_agent` and `wait`.
- * `send_message`/`stop_agent` are NOT advertised — their orchestrator methods
- * don't exist until Task 6.1, and advertising a non-functional tool to a live
- * provider session is worse than not advertising it at all.
+ * Registers all four v1 sub-agent tools (design decision 11): `spawn_agent`,
+ * `wait`, `send_message`, and `stop_agent` (Task 6.1). `send_message` starts a
+ * follow-up turn on a child the caller already spawned; `stop_agent` stops
+ * one. Both are ownership-checked server-side by
+ * `SubAgentOrchestrator.sendMessage`/`stopAgent`
+ * (`orchestration/Layers/SubAgentOrchestrator.ts`'s `assertOwnership`) — a
+ * caller can only target an `agentId` it spawned itself, never an arbitrary
+ * thread id or another caller's child.
  *
  * Error convention (mirrors MCP conventions):
  * - TOOL errors (depth-limit, provider-unavailable, bad arguments, unknown
@@ -30,7 +34,9 @@ import type { OrchestrationThread } from "@t3tools/contracts";
 import {
   ProviderKind,
   SubAgentApprovalMode,
+  SubAgentSendMessageInput,
   SubAgentSpawnInput,
+  SubAgentStopInput,
   SubAgentWaitInput,
   SubAgentWorkspaceMode,
   SubAgentWaitMode,
@@ -205,10 +211,59 @@ const WAIT_TOOL: McpToolDefinition = {
   },
 };
 
-const TOOL_DEFINITIONS: readonly McpToolDefinition[] = [SPAWN_AGENT_TOOL, WAIT_TOOL];
+const SEND_MESSAGE_TOOL: McpToolDefinition = {
+  name: "send_message",
+  description:
+    "Send a follow-up task to a sub-agent YOU spawned (starts a new turn on that child). Only " +
+    "works on an agentId returned by your own spawn_agent call — sending to any other agentId " +
+    "fails with a not-owner error. Non-blocking: call the 'wait' tool again with the same agentId " +
+    "to block until this follow-up turn finishes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agentId: {
+        type: "string",
+        description: "Handle returned by spawn_agent for the sub-agent you spawned.",
+      },
+      task: {
+        type: "string",
+        minLength: 1,
+        description: "The follow-up task/prompt handed to the sub-agent as its next turn.",
+      },
+    },
+    required: ["agentId", "task"],
+  },
+};
+
+const STOP_AGENT_TOOL: McpToolDefinition = {
+  name: "stop_agent",
+  description:
+    "Stop a sub-agent YOU spawned. Only works on an agentId returned by your own spawn_agent call " +
+    "— stopping any other agentId fails with a not-owner error. Idempotent: stopping an " +
+    "already-stopped sub-agent is a safe no-op.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      agentId: {
+        type: "string",
+        description: "Handle returned by spawn_agent for the sub-agent you spawned.",
+      },
+    },
+    required: ["agentId"],
+  },
+};
+
+const TOOL_DEFINITIONS: readonly McpToolDefinition[] = [
+  SPAWN_AGENT_TOOL,
+  WAIT_TOOL,
+  SEND_MESSAGE_TOOL,
+  STOP_AGENT_TOOL,
+];
 
 const decodeSpawnInput = Schema.decodeUnknownEffect(SubAgentSpawnInput);
 const decodeWaitInput = Schema.decodeUnknownEffect(SubAgentWaitInput);
+const decodeSendMessageInput = Schema.decodeUnknownEffect(SubAgentSendMessageInput);
+const decodeStopInput = Schema.decodeUnknownEffect(SubAgentStopInput);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -373,6 +428,53 @@ export const SubAgentMcpServerLive = Layer.effect(
         return toolSuccessResult(waited.success);
       });
 
+    // Task 6.1: `send_message`/`stop_agent` both pass `caller` (the resolved
+    // `SessionTokenIdentity`, `{threadId, canSpawn}`) straight through to the
+    // orchestrator -- unlike `spawn_agent`, no projection lookup is needed
+    // here to build the caller context: `SubAgentOrchestrator.sendMessage`/
+    // `stopAgent` only need `caller.threadId` (see `SubAgentCaller` in
+    // `orchestration/Services/SubAgentOrchestrator.ts`), which the token
+    // identity already carries. Ownership itself (is `agentId` actually this
+    // caller's child?) is enforced server-side by the orchestrator's
+    // `assertOwnership`, not here.
+    const handleSendMessage = (
+      caller: SessionTokenIdentity,
+      rawArgs: unknown,
+    ): Effect.Effect<McpToolCallResult> =>
+      Effect.gen(function* () {
+        const decoded = yield* Effect.result(decodeSendMessageInput(rawArgs));
+        if (Result.isFailure(decoded)) {
+          return toolErrorResult("invalid-arguments", formatSchemaIssue(decoded.failure));
+        }
+
+        const sent = yield* Effect.result(orchestrator.sendMessage(caller, decoded.success));
+        if (Result.isFailure(sent)) {
+          const error: SubAgentError = sent.failure;
+          return toolErrorResult(error.reason, error.detail);
+        }
+
+        return toolSuccessResult({ ok: true });
+      });
+
+    const handleStopAgent = (
+      caller: SessionTokenIdentity,
+      rawArgs: unknown,
+    ): Effect.Effect<McpToolCallResult> =>
+      Effect.gen(function* () {
+        const decoded = yield* Effect.result(decodeStopInput(rawArgs));
+        if (Result.isFailure(decoded)) {
+          return toolErrorResult("invalid-arguments", formatSchemaIssue(decoded.failure));
+        }
+
+        const stopped = yield* Effect.result(orchestrator.stopAgent(caller, decoded.success));
+        if (Result.isFailure(stopped)) {
+          const error: SubAgentError = stopped.failure;
+          return toolErrorResult(error.reason, error.detail);
+        }
+
+        return toolSuccessResult({ ok: true });
+      });
+
     const dispatchToolCall = (
       caller: SessionTokenIdentity,
       name: string,
@@ -383,6 +485,10 @@ export const SubAgentMcpServerLive = Layer.effect(
           return handleSpawnAgent(caller, args);
         case WAIT_TOOL.name:
           return handleWait(args);
+        case SEND_MESSAGE_TOOL.name:
+          return handleSendMessage(caller, args);
+        case STOP_AGENT_TOOL.name:
+          return handleStopAgent(caller, args);
         default:
           return Effect.succeed(toolErrorResult("unknown-tool", `No such tool '${name}'.`));
       }

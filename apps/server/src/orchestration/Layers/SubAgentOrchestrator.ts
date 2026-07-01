@@ -23,6 +23,15 @@
  *   that commit rather than bare HEAD. `includeWip` only applies to
  *   `"worktree"` -- it is ignored for `"share"`.
  *
+ * `sendMessage` and `stopAgent` (Task 6.1) are the ownership-checked v1
+ * multi-turn/lifecycle tools: both run `assertOwnership` FIRST -- the target
+ * `agentId` must be a thread whose `parentThreadId` is the calling session's
+ * own `threadId`, or the call fails with `SubAgentError` reason `"not-owner"`
+ * before any dispatch. `sendMessage` then dispatches a `thread.turn.start`
+ * for the child mirroring `spawn`'s own first-turn dispatch; `stopAgent`
+ * delegates to the caller-agnostic `stop` (used directly, without an
+ * ownership check, by `cascadeStopChildren`).
+ *
  * @module SubAgentOrchestratorLive
  */
 import { randomUUID } from "node:crypto";
@@ -65,6 +74,7 @@ import { ProviderDiscoveryService } from "../../provider/Services/ProviderDiscov
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
+  type SubAgentCaller,
   SubAgentError,
   SubAgentOrchestrator,
   type SubAgentOrchestratorShape,
@@ -410,6 +420,44 @@ export const SubAgentOrchestratorLive = Layer.effect(
               detail: `Failed to read sub-agent thread '${agentId}'.`,
               cause,
             }),
+        ),
+      );
+
+    // Task 6.1: shared ownership check for `sendMessage`/`stopAgent`. Resolves
+    // the target `agentId`'s shell row -- `parentThreadId` is all
+    // `assertOwnership` needs, so this uses the same lightweight
+    // `getThreadShellById` read `spawn`'s per-root concurrency cap (Task 5.2)
+    // and `cascadeStopChildren` (Task 5.3) already lean on for shell-level
+    // reads, rather than hydrating a full thread detail. Fails with
+    // `SubAgentError` reason `"not-owner"` unless the target thread EXISTS
+    // AND its `parentThreadId` is exactly `caller.threadId` -- both callers
+    // run this FIRST, before any dispatch, so a rejected call has zero side
+    // effects. An infra failure resolving the target also surfaces as
+    // `"not-owner"` rather than a separate reason: ownership cannot be
+    // confirmed, so the operation cannot proceed on the caller's behalf
+    // (the same fail-closed philosophy `spawn`'s concurrency-cap read uses).
+    const assertOwnership = (
+      caller: SubAgentCaller,
+      agentId: ThreadId,
+    ): Effect.Effect<void, SubAgentError> =>
+      projection.getThreadShellById(agentId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new SubAgentError({
+              reason: "not-owner",
+              detail: `Failed to resolve sub-agent '${agentId}' while checking ownership.`,
+              cause,
+            }),
+        ),
+        Effect.flatMap((threadOption) =>
+          Option.isSome(threadOption) && threadOption.value.parentThreadId === caller.threadId
+            ? Effect.void
+            : Effect.fail(
+                new SubAgentError({
+                  reason: "not-owner",
+                  detail: `Sub-agent '${agentId}' is not a child of the calling session '${caller.threadId}'.`,
+                }),
+              ),
         ),
       );
 
@@ -887,6 +935,64 @@ export const SubAgentOrchestratorLive = Layer.effect(
         }),
       );
 
+    // Task 6.1: start a follow-up turn on a child the caller already spawned.
+    // Ownership is checked FIRST (`assertOwnership` above) -- a rejected call
+    // dispatches nothing. Once confirmed, re-reads the child's shell row to
+    // get its `modelSelection`/`runtimeMode`/`interactionMode`:
+    // `assertOwnership` only returns `void` per its own contract, so this is
+    // a deliberate second (cheap, shell-level) read rather than threading the
+    // already-fetched thread back out of it. Dispatches `thread.turn.start`
+    // for `input.agentId` -- the SAME command shape `spawn` uses for a
+    // child's FIRST turn (fresh `CommandId`/`MessageId`,
+    // `dispatchMode: "queue"`, the child's own model/runtime/interaction
+    // mode), so a follow-up turn is indistinguishable from any other turn on
+    // the child's own timeline. `dispatchMode: "queue"` means a child that is
+    // still mid-turn queues this follow-up rather than rejecting it -- the
+    // caller does not need to `wait` for the child to go idle first.
+    const sendMessage: SubAgentOrchestratorShape["sendMessage"] = (caller, input) =>
+      Effect.gen(function* () {
+        yield* assertOwnership(caller, input.agentId);
+
+        const childOption = yield* projection.getThreadShellById(input.agentId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SubAgentError({
+                reason: "not-owner",
+                detail: `Failed to re-read sub-agent '${input.agentId}' after confirming ownership.`,
+                cause,
+              }),
+          ),
+        );
+        if (Option.isNone(childOption)) {
+          return yield* Effect.fail(
+            new SubAgentError({
+              reason: "not-owner",
+              detail: `Sub-agent '${input.agentId}' disappeared after ownership was confirmed.`,
+            }),
+          );
+        }
+        const child = childOption.value;
+
+        yield* engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe(randomUUID()),
+            threadId: input.agentId,
+            message: {
+              messageId: MessageId.makeUnsafe(randomUUID()),
+              role: "user",
+              text: input.task,
+              attachments: [],
+            },
+            modelSelection: child.modelSelection,
+            dispatchMode: "queue",
+            runtimeMode: child.runtimeMode,
+            interactionMode: child.interactionMode,
+            createdAt: new Date().toISOString(),
+          })
+          .pipe(Effect.mapError(toDispatchError));
+      });
+
     // Task 5.3: stop one child's session. Dispatches ONLY
     // `ThreadSessionStopCommand` for `agentId` -- deliberately NOT a separate
     // `ThreadTurnInterruptCommand` first, even though the child may have an
@@ -954,6 +1060,17 @@ export const SubAgentOrchestratorLive = Layer.effect(
         })
         .pipe(Effect.asVoid, Effect.mapError(toDispatchError));
 
+    // Task 6.1: stop a child the caller already spawned. Ownership is checked
+    // FIRST (`assertOwnership` above) -- a rejected call stops nothing. Once
+    // confirmed, delegates to the caller-agnostic `stop` above, which is the
+    // single place that knows how a session-stop dispatch behaves (see its
+    // own doc comment for the full "why not also interrupt" rationale).
+    const stopAgent: SubAgentOrchestratorShape["stopAgent"] = (caller, input) =>
+      Effect.gen(function* () {
+        yield* assertOwnership(caller, input.agentId);
+        yield* stop(input.agentId);
+      });
+
     // Task 5.3: cascade-stop every LIVE child of `parentThreadId`. Reuses the
     // exact same "live child" read/predicate as `spawn`'s per-root
     // concurrency cap (Task 5.2) -- `ProjectionSnapshotQuery.getShellSnapshot`
@@ -992,6 +1109,13 @@ export const SubAgentOrchestratorLive = Layer.effect(
         yield* Effect.forEach(liveChildIds, stop, { discard: true });
       });
 
-    return { spawn, wait, stop, cascadeStopChildren } satisfies SubAgentOrchestratorShape;
+    return {
+      spawn,
+      wait,
+      sendMessage,
+      stopAgent,
+      stop,
+      cascadeStopChildren,
+    } satisfies SubAgentOrchestratorShape;
   }),
 );
