@@ -8,6 +8,7 @@ import {
   buildCursorAcpModelDescriptors,
   buildCursorAcpModelDescriptorsFromAvailableModels,
   buildCursorAcpSpawnInput,
+  buildCursorSubagentMcpServers,
   flattenCursorAcpModelChoices,
   parseCursorCliModelList,
   type CursorAcpAvailableModel,
@@ -218,6 +219,28 @@ describe("buildCursorAcpSpawnInput", () => {
         BROWSER: "www-browser",
       },
     });
+  });
+});
+
+describe("buildCursorSubagentMcpServers", () => {
+  it("builds a synara HTTP MCP server entry with the bearer token header", () => {
+    expect(
+      buildCursorSubagentMcpServers({
+        url: "http://127.0.0.1:4173/internal/subagent-mcp",
+        token: "tok-123",
+      }),
+    ).toEqual([
+      {
+        type: "http",
+        name: "synara",
+        url: "http://127.0.0.1:4173/internal/subagent-mcp",
+        headers: [{ name: "Authorization", value: "Bearer tok-123" }],
+      },
+    ]);
+  });
+
+  it("returns an empty array when subagentMcp is absent", () => {
+    expect(buildCursorSubagentMcpServers(undefined)).toEqual([]);
   });
 });
 

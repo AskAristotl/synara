@@ -82,6 +82,7 @@ import {
 import {
   applyCursorAcpModelSelection,
   buildCursorCliModelListCommand,
+  buildCursorSubagentMcpServers,
   fetchCursorAcpModelDescriptors,
   makeCursorAcpRuntime,
   parseCursorCliModelList,
@@ -716,6 +717,7 @@ export function makeCursorAdapter(
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "Synara", version: "0.0.0" },
+            mcpServers: buildCursorSubagentMcpServers(input.subagentMcp),
             ...acpNativeLoggers,
           }).pipe(
             Effect.provideService(Scope.Scope, sessionScope),

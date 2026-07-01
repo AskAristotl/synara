@@ -6,7 +6,11 @@
  *
  * @module CursorAcpSupport
  */
-import { type CursorModelOptions, type ProviderModelDescriptor } from "@t3tools/contracts";
+import {
+  type CursorModelOptions,
+  type ProviderModelDescriptor,
+  type ProviderSessionStartInput,
+} from "@t3tools/contracts";
 import { formatModelDisplayName } from "@t3tools/shared/model";
 import { Effect, Layer, Schema, Scope, ServiceMap } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -82,6 +86,29 @@ export function buildCursorAcpSpawnInput(
     // Keep ACP startup browserless without forcing CI/noninteractive flags onto user turns.
     env: CURSOR_AGENT_BROWSERLESS_ENV,
   };
+}
+
+// Sub-agent MCP server name Cursor sessions register when the orchestrator hands
+// this session a loopback endpoint for spawn_agent/wait/send_message/stop_agent
+// tool calls (see docs/superpowers/specs/2026-06-30-cross-model-agents-design.md
+// §3.2/§3.3). ACP's McpServer HTTP variant carries headers as a name/value array
+// (not a Record), so the bearer token is projected into that shape here.
+const CURSOR_SUBAGENT_MCP_SERVER_NAME = "synara";
+
+export function buildCursorSubagentMcpServers(
+  subagentMcp: ProviderSessionStartInput["subagentMcp"],
+): ReadonlyArray<EffectAcpSchema.McpServer> {
+  if (!subagentMcp) {
+    return [];
+  }
+  return [
+    {
+      type: "http",
+      name: CURSOR_SUBAGENT_MCP_SERVER_NAME,
+      url: subagentMcp.url,
+      headers: [{ name: "Authorization", value: `Bearer ${subagentMcp.token}` }],
+    },
+  ];
 }
 
 export function buildCursorCliModelListCommand(

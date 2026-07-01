@@ -440,6 +440,118 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
+  it.effect("threads mcpServers into the session/new request payload", () => {
+    const requestEvents: Array<AcpSessionRequestLogEvent> = [];
+    const synaraMcpServer = {
+      type: "http" as const,
+      name: "synara",
+      url: "http://127.0.0.1:4173/internal/subagent-mcp",
+      headers: [{ name: "Authorization", value: "Bearer tok-123" }],
+    };
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+
+      const newSessionStarted = requestEvents.find(
+        (event) => event.method === "session/new" && event.status === "started",
+      );
+      expect(newSessionStarted?.payload).toMatchObject({
+        mcpServers: [synaraMcpServer],
+      });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          mcpServers: [synaraMcpServer],
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect("defaults mcpServers to an empty array in session/new when not provided", () => {
+    const requestEvents: Array<AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+
+      const newSessionStarted = requestEvents.find(
+        (event) => event.method === "session/new" && event.status === "started",
+      );
+      expect(newSessionStarted?.payload).toMatchObject({ mcpServers: [] });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
+  it.effect("threads mcpServers into the session/load request payload", () => {
+    const requestEvents: Array<AcpSessionRequestLogEvent> = [];
+    const synaraMcpServer = {
+      type: "http" as const,
+      name: "synara",
+      url: "http://127.0.0.1:4173/internal/subagent-mcp",
+      headers: [{ name: "Authorization", value: "Bearer tok-123" }],
+    };
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+
+      const loadStarted = requestEvents.find(
+        (event) => event.method === "session/load" && event.status === "started",
+      );
+      expect(loadStarted?.payload).toMatchObject({
+        mcpServers: [synaraMcpServer],
+      });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+          },
+          cwd: process.cwd(),
+          resumeSessionId: "mock-session-1",
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          mcpServers: [synaraMcpServer],
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
   it.effect("rejects invalid config option values before sending session/set_config_option", () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), "acp-runtime-"));
     const requestLogPath = path.join(tempDir, "requests.ndjson");
