@@ -60,6 +60,7 @@ import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracke
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries";
 import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem";
 import { shouldRejectUntrustedRequestOrigin } from "./trustedOrigins";
+import { shouldRejectWsUpgrade } from "./wsOriginPolicy";
 import { bufferLiveUiStream, type LiveUiStreamDropReport } from "./wsStreamBackpressure";
 
 const MAX_DIAGNOSTIC_CHILD_PROCESSES = 80;
@@ -1215,21 +1216,33 @@ export const websocketRpcRouteLayer = Layer.effectDiscard(
           return HttpServerResponse.text("Forbidden", { status: 403 });
         }
         const legacyToken = url.searchParams.get("token");
-        const websocketToken = url.searchParams.get(WEBSOCKET_TOKEN_QUERY_PARAM);
-        // An explicit token (ws-token or legacy token query param) is bearer-derived
-        // proof of authorization, not an ambient credential a browser attaches
-        // automatically. Origin-based CSRF checks exist to guard ambient-cookie
-        // auth; they add nothing for a connection that already proves itself via a
-        // token, and would otherwise block legitimate cross-origin multi-host
-        // clients (e.g. a phone browser on origin A pairing/connecting to host B).
-        // Token-less/cookie-based connections remain origin-gated as before.
-        const hasExplicitToken = Boolean(legacyToken?.trim()) || Boolean(websocketToken?.trim());
+        const websocketToken = url.searchParams.get(WEBSOCKET_TOKEN_QUERY_PARAM)?.trim();
+        const legacyAuthorized = Boolean(config.authToken) && legacyToken === config.authToken;
+        // A VALIDATED token is bearer-derived proof of authorization, not an
+        // ambient credential a browser attaches automatically. Origin-based CSRF
+        // checks exist to guard ambient-cookie auth; they add nothing for a
+        // connection that already proves itself via a validated token, and would
+        // otherwise block legitimate cross-origin multi-host clients (e.g. a phone
+        // browser on origin A pairing/connecting to host B). Token PRESENCE alone
+        // must never bypass this gate: any cross-origin page can attach an
+        // arbitrary `?wsToken=garbage` query param, so only a token that actually
+        // verifies against the session store counts. Token-less/invalid-token/
+        // cookie-based connections remain origin-gated as before.
+        const wsTokenValidated = websocketToken
+          ? yield* sessions.verifyWebSocketToken(websocketToken).pipe(
+              Effect.map(() => true),
+              Effect.catch(() => Effect.succeed(false)),
+            )
+          : false;
         if (
-          !hasExplicitToken &&
-          shouldRejectUntrustedRequestOrigin({
-            rawOrigin: request.headers.origin,
-            requestOrigin: url.origin,
-            config,
+          shouldRejectWsUpgrade({
+            legacyAuthorized,
+            wsTokenValidated,
+            originUntrusted: shouldRejectUntrustedRequestOrigin({
+              rawOrigin: request.headers.origin,
+              requestOrigin: url.origin,
+              config,
+            }),
           })
         ) {
           return HttpServerResponse.text("Forbidden", { status: 403 });
