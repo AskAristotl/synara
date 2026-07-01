@@ -57,7 +57,12 @@ import type { Effect } from "effect";
  * project's repo root or provision the isolated Git worktree, or (Task 4.2)
  * that could not snapshot the parent's uncommitted changes for `includeWip`
  * — `spawn` fails before dispatching any command, so no half-created thread
- * is left behind.
+ * is left behind. `"stop-failed"` (Task 5.3) covers an infra failure reading
+ * the parent's live children while cascading a stop
+ * (`cascadeStopChildren`'s `ProjectionSnapshotQuery.getShellSnapshot` read)
+ * -- a per-child dispatch failure inside `stop`/`cascadeStopChildren` still
+ * surfaces as `"dispatch-failed"` (the same `toDispatchError` mapping
+ * `spawn` uses for its own command dispatches).
  */
 export const SubAgentErrorReason = Schema.Literals([
   "provider-unavailable",
@@ -68,6 +73,7 @@ export const SubAgentErrorReason = Schema.Literals([
   "worktree-failed",
   "depth-limit",
   "concurrency-limit",
+  "stop-failed",
 ]);
 export type SubAgentErrorReason = typeof SubAgentErrorReason.Type;
 
@@ -116,7 +122,7 @@ export interface SubAgentSpawnCaller {
 /**
  * SubAgentOrchestratorShape - Service API for cross-model sub-agent lifecycle.
  *
- * `wait`, `sendMessage`, and `stop` are added by later tasks.
+ * `sendMessage` is added by a later task.
  */
 export interface SubAgentOrchestratorShape {
   /**
@@ -165,6 +171,45 @@ export interface SubAgentOrchestratorShape {
   readonly wait: (
     input: SubAgentWaitInput,
   ) => Effect.Effect<readonly SubAgentResult[], SubAgentError>;
+
+  /**
+   * Stop a single child's session (Task 5.3).
+   *
+   * Dispatches `ThreadSessionStopCommand` for `agentId` and nothing else --
+   * see `Layers/SubAgentOrchestrator.ts`'s `stop` implementation comment for
+   * the "why not also dispatch an interrupt" rationale (short version: a
+   * bare session-stop already drives the child's session to a terminal
+   * `"stopped"` status, and a *separate* `ThreadTurnInterruptCommand` would
+   * be actively unsafe for a cross-model child under the current
+   * `ProviderCommandReactor` routing -- it would target the child's PARENT
+   * session, not the child's own).
+   *
+   * Caller-agnostic: performs no ownership/authorization check. Task 6.1
+   * adds the `stop_agent` MCP tool and its ownership check on top of this.
+   * Stopping an already-terminal (or unknown) `agentId` is a safe no-op:
+   * `thread.session.stop` only requires the thread to exist, and re-stopping
+   * an already-stopped session is idempotent at the decider/reactor level.
+   */
+  readonly stop: (agentId: ThreadId) => Effect.Effect<void, SubAgentError>;
+
+  /**
+   * Cascade-stop every LIVE child of `parentThreadId` (Task 5.3, design
+   * decision 13: "Stopping a parent cascade-stops its running children.",
+   * docs/superpowers/specs/2026-06-30-cross-model-agents-design.md).
+   *
+   * Enumerates the parent's children via `ProjectionSnapshotQuery.getShellSnapshot`
+   * (the same lightweight read `spawn`'s per-root concurrency cap uses, Task
+   * 5.2) and calls `stop` on each child whose session is still LIVE per
+   * `isLiveChildSession` (`Layers/SubAgentOrchestrator.ts`) -- an
+   * already-terminal child (`"stopped"`/`"error"`/`"interrupted"`, or no
+   * session at all) is skipped, making a repeated call (e.g. the recursive
+   * one this same stop triggers for each just-stopped child, see the
+   * `SubAgentCascadeStopReactor` doc) a no-op for anything already handled.
+   * A parent with no children is a no-op. Failing to read the parent's
+   * children fails with reason `"stop-failed"`; a per-child dispatch
+   * failure surfaces as `"dispatch-failed"` (from `stop`).
+   */
+  readonly cascadeStopChildren: (parentThreadId: ThreadId) => Effect.Effect<void, SubAgentError>;
 }
 
 /**

@@ -1283,6 +1283,103 @@ describe("SubAgentOrchestrator.spawn (Task 5.2: depth-1 + per-root concurrency c
   });
 });
 
+describe("SubAgentOrchestrator.stop (Task 5.3)", () => {
+  it("dispatches exactly one thread.session.stop command for the given agentId", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const agentId = ThreadId.makeUnsafe(randomUUID());
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.stop(agentId));
+
+      expect(commands).toHaveLength(1);
+      const stopCommand = commands[0];
+      if (stopCommand?.type !== "thread.session.stop") {
+        throw new Error("expected the dispatched command to be thread.session.stop");
+      }
+      expect(stopCommand.threadId).toBe(agentId);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.cascadeStopChildren (Task 5.3)", () => {
+  it("stops every LIVE child of the parent, skipping an already-terminal child", async () => {
+    const parentThreadId = ThreadId.makeUnsafe(randomUUID());
+    const liveChildA = makeChildShell(parentThreadId, "running");
+    const liveChildB = makeChildShell(parentThreadId, "idle");
+    const terminalChild = makeChildShell(parentThreadId, "stopped");
+    const shellThreads = [liveChildA, liveChildB, terminalChild];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.cascadeStopChildren(parentThreadId));
+
+      expect(commands).toHaveLength(2);
+      const stoppedThreadIds = commands.map((command) => {
+        if (command.type !== "thread.session.stop") {
+          throw new Error(`expected only thread.session.stop commands, got '${command.type}'`);
+        }
+        return command.threadId;
+      });
+      expect(new Set(stoppedThreadIds)).toEqual(new Set([liveChildA.id, liveChildB.id]));
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("is a no-op for a parent with no children", async () => {
+    const parentThreadId = ThreadId.makeUnsafe(randomUUID());
+    const { runtime, commands } = buildHarness({ available: true, shellThreads: [] });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.cascadeStopChildren(parentThreadId));
+
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("is a no-op when the parent's only children are already terminal", async () => {
+    const parentThreadId = ThreadId.makeUnsafe(randomUUID());
+    const shellThreads = [
+      makeChildShell(parentThreadId, "stopped"),
+      makeChildShell(parentThreadId, "error"),
+      makeChildShell(parentThreadId, "interrupted"),
+    ];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.cascadeStopChildren(parentThreadId));
+
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("ignores children belonging to a DIFFERENT parent", async () => {
+    const parentThreadId = ThreadId.makeUnsafe(randomUUID());
+    const otherParentThreadId = ThreadId.makeUnsafe(randomUUID());
+    const shellThreads = [makeChildShell(otherParentThreadId, "running")];
+    const { runtime, commands } = buildHarness({ available: true, shellThreads });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.cascadeStopChildren(parentThreadId));
+
+      expect(commands).toHaveLength(0);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
 describe("SubAgentOrchestrator.wait (terminal collection)", () => {
   it("returns one completed envelope with the child's last assistant message once its turn finishes", async () => {
     const { runtime, setThread, pushEvent } = buildWaitHarness();

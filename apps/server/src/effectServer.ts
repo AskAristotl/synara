@@ -22,6 +22,7 @@ import { OrchestrationEngineService } from "./orchestration/Services/Orchestrati
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { SubAgentApprovalResolver } from "./orchestration/Services/SubAgentApprovalResolver";
+import { SubAgentCascadeStopReactor } from "./orchestration/Services/SubAgentCascadeStopReactor";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor";
 import { reconcileRestartStuckTurns } from "./orchestration/startupTurnReconciliation";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper";
@@ -51,6 +52,7 @@ export interface ServerShape {
     | ServerRuntimeStartup
     | ServerSettingsService
     | SubAgentApprovalResolver
+    | SubAgentCascadeStopReactor
     | ThreadDeletionReactor
   >;
   readonly stopSignal: Effect.Effect<void, never>;
@@ -77,6 +79,7 @@ export const createEffectServer = Effect.fn(function* () {
   const runtimeStartup = yield* ServerRuntimeStartup;
   const serverSettings = yield* ServerSettingsService;
   const subAgentApprovalResolver = yield* SubAgentApprovalResolver;
+  const subAgentCascadeStopReactor = yield* SubAgentCascadeStopReactor;
   const threadDeletionReactor = yield* ThreadDeletionReactor;
   const readiness = yield* makeServerReadiness;
 
@@ -137,6 +140,7 @@ export const createEffectServer = Effect.fn(function* () {
   yield* Scope.provide(automationRunReactor.start(), subscriptionsScope);
   yield* Scope.provide(threadDeletionReactor.start(), subscriptionsScope);
   yield* Scope.provide(subAgentApprovalResolver.start(), subscriptionsScope);
+  yield* Scope.provide(subAgentCascadeStopReactor.start(), subscriptionsScope);
   yield* Scope.provide(providerSessionReaper.start(), subscriptionsScope);
   yield* readiness.markOrchestrationSubscriptionsReady;
   yield* readiness.markTerminalSubscriptionsReady;

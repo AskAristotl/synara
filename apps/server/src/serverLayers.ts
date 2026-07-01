@@ -12,6 +12,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
 import { SubAgentApprovalResolverLive } from "./orchestration/Layers/SubAgentApprovalResolver";
+import { SubAgentCascadeStopReactorLive } from "./orchestration/Layers/SubAgentCascadeStopReactor";
 import { SubAgentOrchestratorLive } from "./orchestration/Layers/SubAgentOrchestrator";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer";
@@ -96,6 +97,13 @@ export function makeServerRuntimeServicesLayer() {
     Layer.provideMerge(OrchestrationLayerLive),
     Layer.provideMerge(GitCoreLive),
   );
+  // Task 5.3: reacts to `thread.session-stop-requested` by cascade-stopping
+  // the stopping thread's LIVE sub-agent children (`SubAgentOrchestrator.cascadeStopChildren`).
+  // Needs `SubAgentOrchestrator` (for `cascadeStopChildren`) and the engine's
+  // domain-event stream, both already exposed by subAgentOrchestratorLayer.
+  const subAgentCascadeStopReactorLayer = SubAgentCascadeStopReactorLive.pipe(
+    Layer.provideMerge(subAgentOrchestratorLayer),
+  );
   // The sub-agent MCP handler needs SubAgentOrchestrator (spawn/wait) and
   // ProjectionSnapshotQuery (resolving a caller's projectId/workspace from its
   // own thread row, decision #3 in the Task 2.2 brief) -- both already exposed
@@ -151,6 +159,7 @@ export function makeServerRuntimeServicesLayer() {
     threadDeletionReactorLayer,
     subAgentApprovalResolverLayer,
     subAgentOrchestratorLayer,
+    subAgentCascadeStopReactorLayer,
     subAgentMcpServerLayer,
     SessionTokenRegistryLive,
     devServerManagerLayer,

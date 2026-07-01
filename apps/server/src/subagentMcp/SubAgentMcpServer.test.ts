@@ -121,7 +121,16 @@ function createOrchestratorFake(
     waitCalls.push(input);
     return opts.waitResult ?? Effect.succeed([]);
   };
-  return { shape: { spawn, wait }, spawnCalls, waitCalls };
+  // Task 5.3: `stop`/`cascadeStopChildren` are not exercised by
+  // SubAgentMcpServer (the `stop_agent` MCP tool is a later task, per the
+  // Services/SubAgentOrchestrator.ts doc comment) -- unused here, mirrors
+  // the `unused` pattern for untouched ProjectionSnapshotQuery members above.
+  const unused = () => Effect.die(new Error("SubAgentOrchestrator method unused in test"));
+  return {
+    shape: { spawn, wait, stop: unused, cascadeStopChildren: unused },
+    spawnCalls,
+    waitCalls,
+  };
 }
 
 function runHandle(

@@ -887,6 +887,111 @@ export const SubAgentOrchestratorLive = Layer.effect(
         }),
       );
 
-    return { spawn, wait } satisfies SubAgentOrchestratorShape;
+    // Task 5.3: stop one child's session. Dispatches ONLY
+    // `ThreadSessionStopCommand` for `agentId` -- deliberately NOT a separate
+    // `ThreadTurnInterruptCommand` first, even though the child may have an
+    // active turn. Traced end to end before deciding this (see the task
+    // report for the full trace):
+    //
+    // - `thread.session.stop` -> `decider.ts`'s `"thread.session.stop"` case
+    //   -> `thread.session-stop-requested` -> `ProviderCommandReactor.ts`'s
+    //   `processSessionStopRequested` -- which UNCONDITIONALLY drives the
+    //   child's own `thread.session` to a terminal `"stopped"` status
+    //   (`setThreadSession`) regardless of what happens with the underlying
+    //   provider process. So a bare session-stop dispatch is always
+    //   sufficient to make the child stop counting as "live" for
+    //   `isLiveChildSession` / the per-root concurrency cap (Task 5.2) and
+    //   for `cascadeStopChildren`'s own live-child enumeration below.
+    // - Dispatching a SEPARATE `ThreadTurnInterruptCommand` for the child
+    //   would route through `processTurnInterruptRequested`, which resolves
+    //   the "owning" provider-session thread via `resolveProviderSessionThread`.
+    //   That helper predates this cross-model sub-agent feature: it was
+    //   built for a DIFFERENT, provider-NATIVE "sub-agent" concept (a
+    //   provider's own in-process collaborator/tool-call conversation,
+    //   represented as a synthetic thread id `subagent:<parentId>:<childId>`,
+    //   see `ProviderRuntimeIngestion.ts`'s `subagentThreadId`) that
+    //   genuinely DOES share its parent's real provider session/process.
+    //   `resolveProviderSessionThread` treats ANY thread with a non-null
+    //   `parentThreadId` as belonging to that shared-session case -- it does
+    //   NOT check for the `subagent:` id prefix before redirecting to the
+    //   parent. A cross-model child minted by `spawn` above has
+    //   `parentThreadId` set (to the caller) but a PLAIN `ThreadId`
+    //   (`randomUUID()`, no prefix) and a REAL, independent provider session
+    //   of its own (`processTurnStartRequested` starts it directly against
+    //   `event.payload.threadId`, never through `resolveProviderSessionThread`).
+    //   So for a cross-model child, `resolveProviderSessionThread` WRONGLY
+    //   resolves to the child's PARENT thread, and a separate interrupt would
+    //   call `providerService.interruptTurn` against the PARENT's own live
+    //   session/turn -- exactly the opposite of "stop the child, leave the
+    //   parent alone." Empirically verified against a real
+    //   `ProviderCommandReactor` harness: dispatching only
+    //   `thread.session.stop` for a plain-UUID child calls neither
+    //   `interruptTurn` nor `stopSession` (the projection still lands on
+    //   `"stopped"` regardless), while a separate interrupt would misfire at
+    //   the parent. Given that, the minimal AND safe choice is a bare
+    //   session-stop.
+    //
+    // NOTE (concern, tracked for follow-up, out of THIS task's scope): this
+    // means a cross-model child's underlying provider PROCESS is not
+    // reliably torn down by `thread.session.stop` today -- only its
+    // orchestration-level session status is. Fixing that requires changing
+    // `ProviderCommandReactor.ts`'s `resolveProviderSessionThread` to
+    // distinguish the two "parentThreadId" cases (e.g. by also checking the
+    // `subagent:` id prefix in its "has parentThreadId" branch, mirroring
+    // what `inferParentThreadFromSyntheticSubagentId` already does in its
+    // "no parentThreadId" branch) -- a cross-cutting change to shared,
+    // heavily-tested provider-command routing that this task's file list
+    // does not include, and is out of scope for cascade-stop itself
+    // (cascade-stop's job is ensuring the STOP COMMAND reaches every live
+    // child, not fixing how an existing single-thread stop is routed).
+    const stop: SubAgentOrchestratorShape["stop"] = (agentId) =>
+      engine
+        .dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.makeUnsafe(randomUUID()),
+          threadId: agentId,
+          createdAt: new Date().toISOString(),
+        })
+        .pipe(Effect.asVoid, Effect.mapError(toDispatchError));
+
+    // Task 5.3: cascade-stop every LIVE child of `parentThreadId`. Reuses the
+    // exact same "live child" read/predicate as `spawn`'s per-root
+    // concurrency cap (Task 5.2) -- `ProjectionSnapshotQuery.getShellSnapshot`
+    // filtered by `parentThreadId` match + `isLiveChildSession` -- so an
+    // already-terminal child (stopped/error/interrupted, or no session at
+    // all) is skipped, not re-stopped. This is what makes the recursive call
+    // this triggers for each freshly-stopped child (via
+    // `SubAgentCascadeStopReactor` reacting to that child's own
+    // `thread.session-stop-requested`) safely terminate: depth-1 governance
+    // (Task 5.2) means a child has no children of its own, so its own
+    // `cascadeStopChildren` call reads an empty live-child list and is a
+    // no-op immediately. Even without depth-1, this can never cycle back to
+    // an ancestor -- `parentThreadId` is fixed at `thread.create` time and
+    // thread ids are unique, so the parent-of/child-of relation is a DAG,
+    // not a graph with cycles.
+    const cascadeStopChildren: SubAgentOrchestratorShape["cascadeStopChildren"] = (
+      parentThreadId,
+    ) =>
+      Effect.gen(function* () {
+        const shellSnapshot = yield* projection.getShellSnapshot().pipe(
+          Effect.mapError(
+            (cause) =>
+              new SubAgentError({
+                reason: "stop-failed",
+                detail: `Failed to read live sub-agent children for cascade-stop of parent '${parentThreadId}'.`,
+                cause,
+              }),
+          ),
+        );
+        const liveChildIds = shellSnapshot.threads
+          .filter(
+            (thread) =>
+              thread.parentThreadId === parentThreadId && isLiveChildSession(thread.session),
+          )
+          .map((thread) => thread.id);
+        yield* Effect.forEach(liveChildIds, stop, { discard: true });
+      });
+
+    return { spawn, wait, stop, cascadeStopChildren } satisfies SubAgentOrchestratorShape;
   }),
 );
