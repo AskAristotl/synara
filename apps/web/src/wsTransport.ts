@@ -180,6 +180,31 @@ export class WsTransport {
     void session.clientPromise.catch(() => {
       if (!this.disposed) void this.reconnect().catch(() => undefined);
     });
+    this.registerProactiveReconnectTriggers();
+  }
+
+  // Phones and laptops kill sockets on background/sleep; redial the moment the
+  // environment says we're back instead of waiting for failure detection.
+  private registerProactiveReconnectTriggers(): void {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+    const kick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      this.requestReconnectNow();
+    };
+    window.addEventListener("online", kick);
+    window.addEventListener("focus", kick);
+    window.addEventListener("pageshow", kick);
+    this.proactiveTriggerCleanups.push(() => {
+      window.removeEventListener("online", kick);
+      window.removeEventListener("focus", kick);
+      window.removeEventListener("pageshow", kick);
+    });
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", kick);
+      this.proactiveTriggerCleanups.push(() =>
+        document.removeEventListener("visibilitychange", kick),
+      );
+    }
   }
 
   /** Attempt to reconnect right now: skip any backoff sleep in progress. */
@@ -247,7 +272,14 @@ export class WsTransport {
       >
     )[method];
     if (!call) throw new WsTransportRpcError({ message: `Unknown RPC method: ${method}` });
-    return (await this.requireRuntime().runPromise(call(normalizedRpcInput))) as T;
+    try {
+      return (await this.requireRuntime().runPromise(call(normalizedRpcInput))) as T;
+    } catch (error) {
+      // A request failing at the RPC-client layer means the socket died between
+      // heartbeats — start reconnecting now rather than waiting for a stream exit.
+      if (isConnectionLevelStreamError(error)) this.requestReconnectNow();
+      throw error;
+    }
   }
 
   subscribe<C extends WsPushChannel>(
