@@ -70,6 +70,7 @@ export interface AppState {
   turnDiffIdsByThreadId?: Record<ThreadId, TurnId[]>;
   turnDiffSummaryByThreadId?: Record<ThreadId, Record<TurnId, Thread["turnDiffSummaries"][number]>>;
   deletedThreadIdsById?: Record<ThreadId, true>;
+  threadDetailLoadErrorById?: Record<ThreadId, string | undefined>;
 }
 
 type ReadModelProject = OrchestrationReadModel["projects"][number];
@@ -130,6 +131,7 @@ const EMPTY_TURN_DIFF_BY_THREAD: Record<
   ThreadId,
   Record<TurnId, Thread["turnDiffSummaries"][number]>
 > = {};
+const EMPTY_THREAD_DETAIL_LOAD_ERROR_BY_ID: Record<ThreadId, string | undefined> = {};
 const THREAD_SUMMARY_ACTIVITY_KINDS = new Set([
   "approval.requested",
   "approval.resolved",
@@ -158,6 +160,7 @@ const initialState: AppState = {
   turnDiffIdsByThreadId: {},
   turnDiffSummaryByThreadId: {},
   deletedThreadIdsById: {},
+  threadDetailLoadErrorById: {},
 };
 const persistedExpandedProjectCwds = new Set<string>();
 const persistedProjectOrderCwds: string[] = [];
@@ -2428,6 +2431,8 @@ function removeThreadState(state: AppState, threadId: ThreadId): AppState {
     state.turnDiffIdsByThreadId ?? EMPTY_TURN_DIFF_IDS_BY_THREAD;
   const { [threadId]: _removedDiffs, ...turnDiffSummaryByThreadId } =
     state.turnDiffSummaryByThreadId ?? EMPTY_TURN_DIFF_BY_THREAD;
+  const { [threadId]: _removedDetailLoadError, ...threadDetailLoadErrorById } =
+    state.threadDetailLoadErrorById ?? EMPTY_THREAD_DETAIL_LOAD_ERROR_BY_ID;
   const { [threadId]: _removedSummary, ...sidebarThreadSummaryById } =
     state.sidebarThreadSummaryById;
   const nextThreadIds = (state.threadIds ?? EMPTY_THREAD_IDS).filter((id) => id !== threadId);
@@ -2455,6 +2460,7 @@ function removeThreadState(state: AppState, threadId: ThreadId): AppState {
     proposedPlanByThreadId,
     turnDiffIdsByThreadId,
     turnDiffSummaryByThreadId,
+    threadDetailLoadErrorById,
     sidebarThreadSummaryById,
     threads: nextThreads,
   };
@@ -4000,6 +4006,10 @@ export function syncServerShellSnapshot(
       state.turnDiffSummaryByThreadId,
       nextThreadIds,
     ),
+    threadDetailLoadErrorById: retainThreadScopedRecord(
+      state.threadDetailLoadErrorById,
+      nextThreadIds,
+    ),
   };
 
   for (const thread of snapshotThreads) {
@@ -4049,7 +4059,7 @@ function syncServerThreadDetailWithOptions(
     options?.updateThreadArray === false
       ? mergeReadModelThreadDetailWithLiveHotPath(thread, previousThread)
       : thread;
-  return commitThreadProjection(
+  const nextState = commitThreadProjection(
     writeThreadState(
       state,
       normalizeThreadFromReadModel(nextThreadDetail, previousThread),
@@ -4061,6 +4071,9 @@ function syncServerThreadDetailWithOptions(
       updateSidebarSummary: false,
     },
   );
+  // A real detail snapshot just landed for this thread, so any previously
+  // recorded load failure is stale — clear it.
+  return clearThreadDetailLoadError(nextState, thread.id);
 }
 
 export function syncServerThreadDetail(state: AppState, thread: ReadModelThread): AppState {
@@ -4135,6 +4148,10 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
       state.turnDiffSummaryByThreadId,
       nextThreadIds,
     ),
+    threadDetailLoadErrorById: retainThreadScopedRecord(
+      state.threadDetailLoadErrorById,
+      nextThreadIds,
+    ),
   };
   for (const thread of nextThreads) {
     normalizedState = writeThreadState(normalizedState, thread);
@@ -4171,6 +4188,7 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
     normalizedState.proposedPlanByThreadId === state.proposedPlanByThreadId &&
     normalizedState.turnDiffIdsByThreadId === state.turnDiffIdsByThreadId &&
     normalizedState.turnDiffSummaryByThreadId === state.turnDiffSummaryByThreadId &&
+    normalizedState.threadDetailLoadErrorById === state.threadDetailLoadErrorById &&
     state.threadsHydrated
   ) {
     return state;
@@ -4310,6 +4328,35 @@ export function setError(state: AppState, threadId: ThreadId, error: string | nu
   });
 }
 
+// Records why a thread's detail snapshot failed to load so the UI can render
+// a retryable error instead of a silently empty composer. Cleared automatically
+// the next time a real detail snapshot is applied for the thread.
+export function setThreadDetailLoadError(
+  state: AppState,
+  threadId: ThreadId,
+  reason: string,
+): AppState {
+  if (state.threadDetailLoadErrorById?.[threadId] === reason) {
+    return state;
+  }
+  return {
+    ...state,
+    threadDetailLoadErrorById: {
+      ...(state.threadDetailLoadErrorById ?? EMPTY_THREAD_DETAIL_LOAD_ERROR_BY_ID),
+      [threadId]: reason,
+    },
+  };
+}
+
+export function clearThreadDetailLoadError(state: AppState, threadId: ThreadId): AppState {
+  if (state.threadDetailLoadErrorById?.[threadId] === undefined) {
+    return state;
+  }
+  const { [threadId]: _removed, ...threadDetailLoadErrorById } =
+    state.threadDetailLoadErrorById ?? EMPTY_THREAD_DETAIL_LOAD_ERROR_BY_ID;
+  return { ...state, threadDetailLoadErrorById };
+}
+
 export function setThreadWorkspace(
   state: AppState,
   threadId: ThreadId,
@@ -4395,6 +4442,8 @@ interface AppStore extends AppState {
   renameProjectLocally: (projectId: Project["id"], name: string | null) => void;
   setError: (threadId: ThreadId, error: string | null) => void;
   setThreadWorkspace: (threadId: ThreadId, patch: ThreadWorkspacePatch) => void;
+  setThreadDetailLoadError: (threadId: ThreadId, reason: string) => void;
+  clearThreadDetailLoadError: (threadId: ThreadId) => void;
 }
 
 export const useStore = create<AppStore>((set) => ({
@@ -4433,6 +4482,10 @@ export const useStore = create<AppStore>((set) => ({
   setError: (threadId, error) => set((state) => setError(state, threadId, error)),
   setThreadWorkspace: (threadId, patch) =>
     set((state) => setThreadWorkspace(state, threadId, patch)),
+  setThreadDetailLoadError: (threadId, reason) =>
+    set((state) => setThreadDetailLoadError(state, threadId, reason)),
+  clearThreadDetailLoadError: (threadId) =>
+    set((state) => clearThreadDetailLoadError(state, threadId)),
 }));
 
 // Reset thread/project state on host switch (merge, not replace, to keep action methods).

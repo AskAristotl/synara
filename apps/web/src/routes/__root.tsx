@@ -1167,6 +1167,10 @@ function EventRouter() {
       }
     });
     const unsubThreadEvent = api.orchestration.onThreadEvent((item) => {
+      if (item.kind === "detail-load-failed") {
+        useStore.getState().setThreadDetailLoadError(item.threadId, item.reason);
+        return;
+      }
       if (item.kind === "snapshot") {
         const threadId = item.snapshot.thread.id;
         threadSnapshotSequenceById.set(threadId, item.snapshot.snapshotSequence);

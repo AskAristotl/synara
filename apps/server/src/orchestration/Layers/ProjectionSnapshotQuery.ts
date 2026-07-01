@@ -33,7 +33,7 @@ import {
   ThreadHandoff,
   ModelSelection,
 } from "@t3tools/contracts";
-import { Effect, Layer, Option, Schema, Struct } from "effect";
+import { Effect, Layer, Option, Schema, SchemaIssue, Struct } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
@@ -71,6 +71,23 @@ const decodeModelSelection = Schema.decodeUnknownEffect(ModelSelection);
 const ModelSelectionJsonUnknown = Schema.fromJsonString(Schema.Unknown);
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_ACTIVITIES = 500;
+
+// Thread DETAIL rows persist several nullable JSON columns (handoff,
+// last-known PR, pinned messages, thread markers) that can drift out of sync
+// with their schema over time. A single unreadable column must never fail the
+// whole thread-detail decode (that would strand the client on a stuck
+// spinner) — it should degrade to `null` and log a warning instead. The
+// Type/Encoded shape stays identical to `Schema.NullOr(Schema.fromJsonString(inner))`.
+function tolerantNullableJsonColumn<S extends Schema.Top>(inner: S, columnLabel: string) {
+  return Schema.NullOr(Schema.fromJsonString(inner)).pipe(
+    Schema.catchDecoding((issue) =>
+      Effect.logWarning(`projection thread detail: dropped unreadable ${columnLabel}`).pipe(
+        Effect.annotateLogs({ issue: SchemaIssue.makeFormatterDefault()(issue) }),
+        Effect.as(Option.some(null)),
+      ),
+    ),
+  );
+}
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(ModelSelectionJsonUnknown),
@@ -92,10 +109,10 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     createBranchFlowCompleted: Schema.Number,
     isPinned: Schema.Number,
-    handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
-    lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
-    pinnedMessages: Schema.NullOr(Schema.fromJsonString(ThreadPinnedMessages)),
-    threadMarkers: Schema.NullOr(Schema.fromJsonString(ThreadMarkers)),
+    handoff: tolerantNullableJsonColumn(ThreadHandoff, "handoff"),
+    lastKnownPr: tolerantNullableJsonColumn(OrchestrationThreadPullRequest, "lastKnownPr"),
+    pinnedMessages: tolerantNullableJsonColumn(ThreadPinnedMessages, "pinnedMessages"),
+    threadMarkers: tolerantNullableJsonColumn(ThreadMarkers, "threadMarkers"),
     modelSelection: ModelSelectionJsonUnknown,
   }),
 );
@@ -2306,6 +2323,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             error,
           );
         }),
+        Effect.tapCause((cause) =>
+          Effect.logWarning("getThreadDetailSnapshotById failed").pipe(
+            Effect.annotateLogs({ threadId, cause: String(cause) }),
+          ),
+        ),
       );
 
   return {

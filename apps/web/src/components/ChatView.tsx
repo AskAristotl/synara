@@ -925,6 +925,8 @@ export default function ChatView({
   const syncServerShellSnapshot = useStore((store) => store.syncServerShellSnapshot);
   const setStoreThreadError = useStore((store) => store.setError);
   const setStoreThreadWorkspace = useStore((store) => store.setThreadWorkspace);
+  const threadDetailLoadErrorById = useStore((store) => store.threadDetailLoadErrorById);
+  const clearThreadDetailLoadError = useStore((store) => store.clearThreadDetailLoadError);
   const { settings } = useAppSettings();
   const assistantDeliveryMode = resolveAssistantDeliveryMode(settings);
   const desktopTopBarTrafficLightGutterClassName = useDesktopTopBarTrafficLightGutterClassName();
@@ -2825,6 +2827,20 @@ export default function ChatView({
     isCenteredEmptyLanding &&
     Boolean(homeDir) &&
     isHomeChatContainerProject(activeProject, { homeDir, chatWorkspaceRoot });
+  // The server's thread-detail snapshot query can fail even when the sidebar/shell
+  // query succeeds (e.g. a drifted JSON column). When that happens for the active
+  // thread we have no messages to show, so surface a retryable error instead of the
+  // empty landing composer — otherwise the user is stuck looking at a blank compose box.
+  const threadDetailLoadError = activeThreadId
+    ? (threadDetailLoadErrorById?.[activeThreadId] ?? null)
+    : null;
+  const isThreadDetailLoadErrorLanding = isCenteredEmptyLanding && threadDetailLoadError !== null;
+  const handleRetryThreadDetailLoad = useCallback(() => {
+    if (!activeThreadId) return;
+    clearThreadDetailLoadError(activeThreadId);
+    const api = readNativeApi();
+    void api?.orchestration.subscribeThread({ threadId: activeThreadId }).catch(() => undefined);
+  }, [activeThreadId, clearThreadDetailLoadError]);
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
   const turnDiffSummaryByAssistantMessageId = useMemo(() => {
@@ -10240,7 +10256,33 @@ export default function ChatView({
               terminalWorkspaceTerminalTabActive ? "pointer-events-none invisible" : "",
             )}
           >
-            {shouldRenderChatPaneContent && isCenteredEmptyLanding ? (
+            {shouldRenderChatPaneContent && isThreadDetailLoadErrorLanding ? (
+              <div
+                className={cn(
+                  "chat-pane-enter flex flex-1 items-center justify-center",
+                  CHAT_COLUMN_GUTTER_CLASS_NAME,
+                )}
+              >
+                <div
+                  className={cn(
+                    "flex flex-col items-center gap-3 px-6 pb-5 text-center select-none",
+                    CHAT_COLUMN_FRAME_CLASS_NAME,
+                  )}
+                >
+                  <h2 className="text-[20px] font-normal leading-[1.15] tracking-[-0.015em] text-foreground/95">
+                    Couldn't load this conversation.
+                  </h2>
+                  <p className="text-sm text-muted-foreground">{threadDetailLoadError}</p>
+                  <Button variant="outline" size="sm" onClick={handleRetryThreadDetailLoad}>
+                    Retry
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {shouldRenderChatPaneContent &&
+            isCenteredEmptyLanding &&
+            !isThreadDetailLoadErrorLanding ? (
               <div
                 className={cn(
                   "chat-pane-enter flex flex-1 items-center justify-center",

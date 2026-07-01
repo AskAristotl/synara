@@ -648,13 +648,26 @@ export const makeWsRpcLayer = () =>
           Stream.merge(
             Stream.fromEffect(
               projectionReadModelQuery.getThreadDetailSnapshotById(input.threadId).pipe(
-                Effect.map((snapshot) =>
-                  Option.map(snapshot, (value) => ({
-                    kind: "snapshot" as const,
-                    snapshot: value,
-                  })),
+                Effect.map(
+                  (snapshot): Option.Option<OrchestrationThreadStreamItem> =>
+                    Option.map(snapshot, (value) => ({
+                      kind: "snapshot" as const,
+                      snapshot: value,
+                    })),
                 ),
-                Effect.mapError((cause) => toWsRpcError(cause, "Failed to load thread snapshot")),
+                // A failed snapshot query must not take down the whole subscribeThread
+                // stream (that would also kill the live-event arm below, stranding the
+                // client on a stuck spinner). Recover it into a single stream item so the
+                // client can render a retryable error while events keep flowing.
+                Effect.catch((cause) =>
+                  Effect.succeed(
+                    Option.some({
+                      kind: "detail-load-failed" as const,
+                      threadId: input.threadId,
+                      reason: toWsRpcError(cause, "Failed to load thread snapshot").message,
+                    }),
+                  ),
+                ),
               ),
             ).pipe(
               Stream.flatMap((snapshot) =>
