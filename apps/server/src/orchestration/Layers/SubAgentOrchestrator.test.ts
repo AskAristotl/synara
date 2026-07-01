@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  CheckpointRef,
   type GitCreateWorktreeInput,
   MessageId,
+  type OrchestrationCheckpointFile,
+  type OrchestrationCheckpointSummary,
   type OrchestrationCommand,
   type OrchestrationEvent,
   OrchestrationThread,
@@ -116,6 +119,10 @@ function makeThread(opts: {
   readonly messages?: ReadonlyArray<{ readonly role: string; readonly text: string }>;
   readonly session: ReturnType<typeof makeSession> | null;
   readonly latestTurnState?: "running" | "completed" | "interrupted" | "error" | null;
+  readonly envMode?: "local" | "worktree";
+  readonly branch?: string | null;
+  readonly worktreePath?: string | null;
+  readonly checkpoints?: ReadonlyArray<OrchestrationCheckpointSummary>;
 }): OrchestrationThread {
   const messages = (opts.messages ?? []).map((message, index) => ({
     id: MessageId.makeUnsafe(randomUUID()),
@@ -136,23 +143,54 @@ function makeThread(opts: {
         assistantMessageId: null,
       }
     : null;
+  const envMode = opts.envMode ?? "local";
   return decodeThread({
     id: opts.id,
     projectId: ProjectId.makeUnsafe(randomUUID()),
     title: "child sub-agent",
     modelSelection: { provider: opts.provider ?? "codex", model: opts.model ?? "gpt-5-codex" },
     runtimeMode: "full-access",
-    branch: null,
-    worktreePath: null,
+    envMode,
+    branch: opts.branch ?? null,
+    worktreePath: opts.worktreePath ?? (envMode === "worktree" ? "/tmp/subagent-worktree" : null),
     latestTurn,
     createdAt: iso(0),
     updatedAt: iso(0),
     deletedAt: null,
     messages,
     activities: [],
-    checkpoints: [],
+    checkpoints: opts.checkpoints ?? [],
     session: opts.session,
   });
+}
+
+/** A single `OrchestrationCheckpointFile` entry, defaulted for brevity. */
+function makeCheckpointFile(
+  overrides: Partial<OrchestrationCheckpointFile> = {},
+): OrchestrationCheckpointFile {
+  return {
+    path: overrides.path ?? "src/index.ts",
+    kind: overrides.kind ?? "modified",
+    additions: overrides.additions ?? 0,
+    deletions: overrides.deletions ?? 0,
+  };
+}
+
+/** A single `OrchestrationCheckpointSummary` entry for a thread's `checkpoints`. */
+function makeCheckpoint(opts: {
+  readonly checkpointTurnCount: number;
+  readonly files?: ReadonlyArray<OrchestrationCheckpointFile>;
+  readonly status?: "ready" | "missing" | "error";
+}): OrchestrationCheckpointSummary {
+  return {
+    turnId: TurnId.makeUnsafe(randomUUID()),
+    checkpointTurnCount: opts.checkpointTurnCount,
+    checkpointRef: CheckpointRef.makeUnsafe(randomUUID()),
+    status: opts.status ?? "ready",
+    files: opts.files ?? [],
+    assistantMessageId: null,
+    completedAt: iso(0),
+  };
 }
 
 /**
@@ -1302,6 +1340,233 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
       expect(results[0]?.status).toBe("completed");
       expect(results[0]?.finalMessage).toBe("finished during seed");
       expect(elapsedMs).toBeLessThan(500);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+});
+
+describe("SubAgentOrchestrator.wait (diff envelope, Task 4.3)", () => {
+  it("populates diff for a worktree child whose latest checkpoint has files", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    const checkpoint = makeCheckpoint({
+      checkpointTurnCount: 1,
+      files: [
+        makeCheckpointFile({ path: "src/a.ts", additions: 5, deletions: 2 }),
+        makeCheckpointFile({ path: "src/b.ts", additions: 1, deletions: 0 }),
+      ],
+    });
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "worktree",
+        branch: "subagent/x",
+        checkpoints: [checkpoint],
+        messages: [
+          { role: "user", text: "do the thing" },
+          { role: "assistant", text: "done" },
+        ],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.diff).toEqual({
+        branch: "subagent/x",
+        filesChanged: 2,
+        summary: "2 files changed, +6/-2",
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("picks the checkpoint with the highest checkpointTurnCount when a worktree child has multiple", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    const earlier = makeCheckpoint({
+      checkpointTurnCount: 1,
+      files: [makeCheckpointFile({ path: "src/old.ts", additions: 100, deletions: 100 })],
+    });
+    const latest = makeCheckpoint({
+      checkpointTurnCount: 2,
+      files: [makeCheckpointFile({ path: "src/new.ts", additions: 3, deletions: 1 })],
+    });
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "worktree",
+        branch: "subagent/y",
+        // Deliberately out of array order to prove selection is by
+        // checkpointTurnCount, not array position.
+        checkpoints: [latest, earlier],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.diff).toEqual({
+        branch: "subagent/y",
+        filesChanged: 1,
+        summary: "1 file changed, +3/-1",
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns diff:null for a share-cwd (envMode:'local') child even with checkpoints", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "local",
+        checkpoints: [
+          makeCheckpoint({
+            checkpointTurnCount: 1,
+            files: [makeCheckpointFile({ additions: 4, deletions: 1 })],
+          }),
+        ],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.diff).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns diff:null for a worktree child with no checkpoints at all", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "worktree",
+        branch: "subagent/z",
+        checkpoints: [],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.diff).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns diff:null for a worktree child whose only checkpoint has empty files", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "worktree",
+        branch: "subagent/z",
+        checkpoints: [makeCheckpoint({ checkpointTurnCount: 1, files: [] })],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.diff).toBeNull();
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("returns diff:null for a worktree child with a filled checkpoint but branch:null", async () => {
+    const { runtime, setThread, pushEvent } = buildWaitHarness();
+    const child = ThreadId.makeUnsafe(randomUUID());
+    setThread(
+      makeThread({
+        id: child,
+        envMode: "worktree",
+        branch: null,
+        checkpoints: [
+          makeCheckpoint({
+            checkpointTurnCount: 1,
+            files: [makeCheckpointFile({ additions: 4, deletions: 1 })],
+          }),
+        ],
+        messages: [{ role: "assistant", text: "done" }],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+    pushEvent(sessionSetEvent(child, makeSession(child, { status: "idle", activeTurnId: null })));
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 30 })),
+      );
+
+      expect(results[0]?.diff).toBeNull();
     } finally {
       await runtime.dispose();
     }

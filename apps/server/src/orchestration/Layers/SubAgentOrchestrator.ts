@@ -32,6 +32,8 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   ModelSelection,
+  type OrchestrationCheckpointFile,
+  type OrchestrationCheckpointSummary,
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationSession,
@@ -40,6 +42,7 @@ import {
   type RuntimeMode,
   type SubAgentApprovalMode,
   type SubAgentResult,
+  type SubAgentResultDiff,
   type SubAgentSpawnInput,
   type SubAgentStatus,
   type ThreadEnvironmentMode,
@@ -242,9 +245,79 @@ function applyDomainEvent(
 }
 
 /**
+ * A concise, deterministic one-line stat for a checkpoint's files, e.g.
+ * `"2 files changed, +6/-2"` (singular `"1 file changed, ..."`). Additions and
+ * deletions are summed across every file in the checkpoint.
+ */
+function summarizeCheckpointFiles(files: readonly OrchestrationCheckpointFile[]): string {
+  const totals = files.reduce(
+    (acc, file) => ({
+      additions: acc.additions + file.additions,
+      deletions: acc.deletions + file.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+  const fileWord = files.length === 1 ? "file" : "files";
+  return `${files.length} ${fileWord} changed, +${totals.additions}/-${totals.deletions}`;
+}
+
+/**
+ * The freshest checkpoint that actually has files, or `null` when the child
+ * has produced no file-bearing checkpoint yet. `thread.checkpoints` is kept
+ * sorted ascending by `checkpointTurnCount` both by the projector's in-memory
+ * fold (`projector.ts`, the `thread.turn-diff-completed` case) and by the SQL
+ * projection read (`ProjectionSnapshotQuery.ts`'s `listCheckpointRowsByThread`,
+ * `ORDER BY checkpoint_turn_count ASC`) — so the array's last entry is already
+ * the most recent by construction. This still selects by MAX
+ * `checkpointTurnCount` explicitly rather than trusting array order, so the
+ * choice stays correct (and self-documenting) even if that upstream ordering
+ * invariant ever changes.
+ */
+function latestCheckpointWithFiles(
+  checkpoints: readonly OrchestrationCheckpointSummary[],
+): OrchestrationCheckpointSummary | null {
+  let latest: OrchestrationCheckpointSummary | null = null;
+  for (const checkpoint of checkpoints) {
+    if (checkpoint.files.length === 0) {
+      continue;
+    }
+    if (latest === null || checkpoint.checkpointTurnCount > latest.checkpointTurnCount) {
+      latest = checkpoint;
+    }
+  }
+  return latest;
+}
+
+/**
+ * Build the `diff` field of a {@link SubAgentResult} envelope (§3.4). Only an
+ * isolated writer -- `envMode:"worktree"` with a resolved `branch` and at
+ * least one file-bearing checkpoint -- gets a non-null diff; a share-cwd
+ * child (`envMode:"local"`) always gets `null` regardless of checkpoints,
+ * since there is no dedicated branch to integrate its changes from. A
+ * worktree child with no branch (should not normally happen -- `branch` is
+ * set at provisioning time, Task 4.1) also falls back to `null`: a diff with
+ * no branch to point callers at is useless.
+ */
+function buildSubAgentDiff(thread: OrchestrationThread): SubAgentResultDiff | null {
+  if (thread.envMode !== "worktree" || thread.branch === null) {
+    return null;
+  }
+  const checkpoint = latestCheckpointWithFiles(thread.checkpoints);
+  if (checkpoint === null) {
+    return null;
+  }
+  return {
+    branch: thread.branch,
+    filesChanged: checkpoint.files.length,
+    summary: summarizeCheckpointFiles(checkpoint.files),
+  };
+}
+
+/**
  * Project a child thread into a {@link SubAgentResult} envelope (§3.4). `diff`
- * is always `null` here — worktree diff population lands in Task 4.3. `error`
- * carries `session.lastError` and is only meaningful for a `"failed"` child.
+ * is populated only for an isolated writer that has produced a file-bearing
+ * checkpoint (see {@link buildSubAgentDiff}). `error` carries
+ * `session.lastError` and is only meaningful for a `"failed"` child.
  */
 function buildSubAgentResult(
   agentId: ThreadId,
@@ -259,7 +332,7 @@ function buildSubAgentResult(
     model: thread.modelSelection.model ?? null,
     status,
     finalMessage: lastAssistantMessage(thread.messages),
-    diff: null,
+    diff: buildSubAgentDiff(thread),
     error: thread.session?.lastError ?? null,
   };
 }
