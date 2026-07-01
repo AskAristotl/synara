@@ -56,6 +56,14 @@ export function HostSwitcher() {
           {visibleHosts.map((host) => (
             <MenuItem key={host.id} onClick={() => switchActiveHost(host.id)}>
               <span className="min-w-0 flex-1 truncate">{host.label}</span>
+              {host.needsRepair ? (
+                <span
+                  className="shrink-0 text-[length:var(--app-font-size-ui-small,11px)] text-amber-500"
+                  title="Needs re-pairing — access was revoked"
+                >
+                  Needs re-pair
+                </span>
+              ) : null}
               {host.id === activeHostId ? <span aria-hidden="true">✓</span> : null}
             </MenuItem>
           ))}

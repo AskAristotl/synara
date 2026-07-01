@@ -60,9 +60,13 @@ export const useHostStore = create<HostStoreState>()(
         const normalized = normalizeBaseUrl(baseUrl);
         const existing = get().hosts.find((h) => h.kind === "remote" && h.baseUrl === normalized);
         if (existing) {
+          // Re-pairing supplies a fresh credential, so clear any stale
+          // "needs re-pair" flag on the existing host.
           set((s) => ({
             hosts: s.hosts.map((h) =>
-              h.id === existing.id ? { ...h, label: label.trim() || h.label } : h,
+              h.id === existing.id
+                ? { ...h, label: label.trim() || h.label, needsRepair: false }
+                : h,
             ),
           }));
           return get().hosts.find((h) => h.id === existing.id)!;

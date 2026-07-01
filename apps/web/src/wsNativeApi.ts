@@ -41,6 +41,8 @@ import { showConfirmDialogFallback } from "./confirmDialogFallback";
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { getActiveHostConnection } from "./hosts/activeHostConnection";
 import type { HostConnection } from "./hosts/hostConnection";
+import { useHostStore } from "./hosts/hostStore";
+import { wrapResolverForRepair } from "./hosts/repairOnRevoked";
 import { WsTransport } from "./wsTransport";
 import { emitWsTransportState } from "./wsTransportEvents";
 
@@ -292,11 +294,18 @@ export function createWsNativeApi(
     instance = null;
   }
 
-  const transport = new WsTransport(() => connection.resolveSocketUrl());
+  const resolveSocketUrl = wrapResolverForRepair(
+    () => connection.resolveSocketUrl(),
+    (hostId) => useHostStore.getState().markNeedsRepair(hostId, true),
+  );
+  const transport = new WsTransport(resolveSocketUrl);
   transport.onStateChange((state) => emitWsTransportState(state));
 
   transport.subscribe(WS_CHANNELS.serverWelcome, (message) => {
     const payload = message.data;
+    // A successful authed connection means the active host's credential is
+    // valid again — clear any stale "needs re-pair" flag for it.
+    useHostStore.getState().markNeedsRepair(useHostStore.getState().activeHostId, false);
     for (const listener of welcomeListeners) {
       try {
         listener(payload);

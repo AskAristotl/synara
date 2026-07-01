@@ -73,4 +73,19 @@ describe("hostStore", () => {
       .addRemoteHost({ label: "Studio", baseUrl: "https://studio.ts.net:3773/pair" });
     expect(host.baseUrl).toBe("https://studio.ts.net:3773");
   });
+
+  it("clears needsRepair when re-adding (re-pairing) an existing host", () => {
+    const host = useHostStore
+      .getState()
+      .addRemoteHost({ label: "Studio", baseUrl: "https://studio.ts.net:3773" });
+    useHostStore.getState().markNeedsRepair(host.id, true);
+    expect(useHostStore.getState().hosts.find((h) => h.id === host.id)?.needsRepair).toBe(true);
+
+    const readded = useHostStore
+      .getState()
+      .addRemoteHost({ label: "Studio", baseUrl: "https://studio.ts.net:3773" });
+    expect(readded.id).toBe(host.id);
+    expect(readded.needsRepair).toBe(false);
+    expect(useHostStore.getState().hosts.find((h) => h.id === host.id)?.needsRepair).toBe(false);
+  });
 });
