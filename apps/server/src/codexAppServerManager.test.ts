@@ -20,6 +20,7 @@ import {
 } from "./codexProcessEnv";
 import {
   buildCodexInitializeParams,
+  buildCodexSubagentMcpConfigOverride,
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
   CodexAppServerManager,
@@ -768,6 +769,28 @@ describe("startSession", () => {
       versionCheck.mockRestore();
       manager.stopAll();
     }
+  });
+});
+
+describe("buildCodexSubagentMcpConfigOverride", () => {
+  it("builds a per-thread mcp_servers config override with the bearer token header", () => {
+    expect(
+      buildCodexSubagentMcpConfigOverride({
+        url: "http://127.0.0.1:4173/internal/subagent-mcp",
+        token: "tok",
+      }),
+    ).toEqual({
+      mcp_servers: {
+        synara: {
+          url: "http://127.0.0.1:4173/internal/subagent-mcp",
+          http_headers: { Authorization: "Bearer tok" },
+        },
+      },
+    });
+  });
+
+  it("returns undefined when no subagentMcp config is provided", () => {
+    expect(buildCodexSubagentMcpConfigOverride(undefined)).toBeUndefined();
   });
 });
 

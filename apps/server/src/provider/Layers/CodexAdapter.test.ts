@@ -226,6 +226,47 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
     }),
   );
+  it.effect("forwards subagentMcp to the manager when provided", () =>
+    Effect.gen(function* () {
+      validationManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+        subagentMcp: {
+          url: "http://127.0.0.1:4173/internal/subagent-mcp",
+          token: "tok",
+        },
+      });
+
+      assert.deepStrictEqual(validationManager.startSessionImpl.mock.calls[0]?.[0], {
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+        subagentMcp: {
+          url: "http://127.0.0.1:4173/internal/subagent-mcp",
+          token: "tok",
+        },
+      });
+    }),
+  );
+  it.effect("omits subagentMcp from the manager input when absent", () =>
+    Effect.gen(function* () {
+      validationManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+
+      const managerInput = validationManager.startSessionImpl.mock.calls[0]?.[0];
+      assert.equal(managerInput !== undefined && "subagentMcp" in managerInput, false);
+    }),
+  );
 });
 
 const sessionErrorManager = new FakeCodexManager();

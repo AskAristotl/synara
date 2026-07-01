@@ -208,6 +208,7 @@ export interface CodexAppServerStartSessionInput {
   readonly resumeCursor?: unknown;
   readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
   readonly runtimeMode: RuntimeMode;
+  readonly subagentMcp?: ProviderSessionStartInput["subagentMcp"];
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -459,6 +460,36 @@ The \`request_user_input\` tool is unavailable in Default mode. If you call it w
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 </collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}`;
+
+// Builds the per-thread `config` overlay that registers the sub-agent MCP server as a
+// streamable-HTTP `mcp_servers` entry named `synara`. Codex app-server's `thread/start`
+// and `thread/resume` params accept a freeform `config` object (same dotted-path config.toml
+// shape as the CLI's `-c key=value` overrides); this overlay is scoped to the thread and is
+// never written to the on-disk config.toml. Field names (`mcp_servers`, `url`, `http_headers`)
+// mirror `codex mcp add --url ... ` for a streamable HTTP server, verified against the
+// installed Codex CLI (see docs/superpowers/sdd/task-3.3-report.md).
+export function buildCodexSubagentMcpConfigOverride(
+  subagentMcp: ProviderSessionStartInput["subagentMcp"],
+):
+  | {
+      readonly mcp_servers: Record<
+        string,
+        { readonly url: string; readonly http_headers: Record<string, string> }
+      >;
+    }
+  | undefined {
+  if (!subagentMcp) {
+    return undefined;
+  }
+  return {
+    mcp_servers: {
+      synara: {
+        url: subagentMcp.url,
+        http_headers: { Authorization: `Bearer ${subagentMcp.token}` },
+      },
+    },
+  };
+}
 
 // Maps Synara's simple runtime toggle to Codex thread-level permission overrides.
 function mapCodexRuntimeMode(runtimeMode: RuntimeMode): {
@@ -849,11 +880,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         normalizeCodexModelSlug(input.model),
         context.account,
       );
+      const subagentMcpConfigOverride = buildCodexSubagentMcpConfigOverride(input.subagentMcp);
       const sessionOverrides = {
         model: normalizedModel ?? null,
         ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
         cwd: resolvedCwd,
         ...mapCodexRuntimeMode(input.runtimeMode ?? "full-access"),
+        ...(subagentMcpConfigOverride ? { config: subagentMcpConfigOverride } : {}),
       };
 
       const threadStartParams = {

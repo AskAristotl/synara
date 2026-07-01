@@ -1617,6 +1617,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         ...(input.modelSelection?.provider === "codex" && input.modelSelection.options?.fastMode
           ? { serviceTier: "fast" }
           : {}),
+        ...(input.subagentMcp ? { subagentMcp: input.subagentMcp } : {}),
       };
 
       return Effect.tryPromise({
