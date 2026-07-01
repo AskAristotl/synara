@@ -8,6 +8,7 @@
 import { useState } from "react";
 
 import { isElectron } from "../../env";
+import { requestTransportReconnect } from "../../wsNativeApi";
 import { LOCAL_HOST_ID, useHostStore } from "../../hosts/hostStore";
 import { switchActiveHost } from "../../hosts/switchActiveHost";
 import { useHostConnectionStatus } from "../../hosts/useHostConnectionStatus";
@@ -52,10 +53,10 @@ export function HostConnectionBanner() {
 
   return (
     <div className="flex items-center justify-between gap-3 bg-red-500/10 px-3 py-2 text-red-600 text-sm">
-      <span>Can't reach {active.label}.</span>
+      <span>Can't reach {active.label}. Retrying automatically…</span>
       <span className="flex gap-2">
-        <Button variant="ghost" size="sm" onClick={() => window.location.reload()}>
-          Retry
+        <Button variant="ghost" size="sm" onClick={() => requestTransportReconnect()}>
+          Retry now
         </Button>
         {isElectron ? (
           <Button variant="ghost" size="sm" onClick={() => switchActiveHost(LOCAL_HOST_ID)}>
