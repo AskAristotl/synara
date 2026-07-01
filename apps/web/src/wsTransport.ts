@@ -73,9 +73,11 @@ function makeProtocolLayer(url: string) {
   // The protocol's built-in dial retry is disabled: it would redial forever with
   // this session's frozen URL (whose one-time wsToken expires after 5 minutes).
   // WsTransport owns reconnection and mints a fresh token per session.
-  return RpcClient.layerProtocolSocket({ retryPolicy: Schedule.recurs(0) }).pipe(
-    Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson)),
-  );
+  // (Layer.effect(Protocol) mirrors layerProtocolSocket, whose declared options
+  // type lags the runtime and omits retryPolicy in this effect beta.)
+  return Layer.effect(RpcClient.Protocol)(
+    RpcClient.makeProtocolSocket({ retryPolicy: Schedule.recurs(0) }),
+  ).pipe(Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson)));
 }
 
 function causeToError(cause: Cause.Cause<unknown>): Error {
@@ -363,7 +365,7 @@ export class WsTransport {
     const call = (
       client as unknown as Record<
         string,
-        (input: unknown) => Effect.Effect<unknown, unknown, never>
+        (input: unknown) => Effect.Effect<unknown, WsTransportRpcError, never>
       >
     )[WS_METHODS.serverGetSettings];
     if (!call) return Promise.resolve();
