@@ -18,18 +18,47 @@ describe("appCorsHeaders", () => {
     expect(headers.Vary).toBe("Origin");
   });
 
-  it("returns no headers for an untrusted origin", () => {
+  it("reflects a cross-origin request (multi-host client on a different origin)", () => {
     const headers = appCorsHeaders({
-      rawOrigin: "https://evil.example.com",
+      rawOrigin: "https://phone.example",
       requestOrigin: "https://studio.tailnet.ts.net:3773",
       config,
     });
-    expect(headers).toEqual({});
+    expect(headers["Access-Control-Allow-Origin"]).toBe("https://phone.example");
+    expect(headers["Access-Control-Allow-Headers"]).toContain("Authorization");
+    expect(headers["Access-Control-Allow-Methods"]).toContain("OPTIONS");
+    expect(headers.Vary).toBe("Origin");
   });
 
   it("returns no headers when no Origin is present", () => {
     expect(appCorsHeaders({ rawOrigin: undefined, requestOrigin: "https://x", config })).toEqual(
       {},
     );
+  });
+
+  it("returns no headers for same-origin requests", () => {
+    expect(
+      appCorsHeaders({
+        rawOrigin: "https://studio.tailnet.ts.net:3773",
+        requestOrigin: "https://studio.tailnet.ts.net:3773",
+        config,
+      }),
+    ).toEqual({});
+  });
+
+  it("never emits Access-Control-Allow-Credentials (bearer-only auth, no ambient cookies)", () => {
+    const headers = appCorsHeaders({
+      rawOrigin: "https://phone.example",
+      requestOrigin: "https://studio.tailnet.ts.net:3773",
+      config,
+    });
+    expect(headers["Access-Control-Allow-Credentials"]).toBeUndefined();
+
+    const trustedHeaders = appCorsHeaders({
+      rawOrigin: "t3://app",
+      requestOrigin: "https://studio.tailnet.ts.net:3773",
+      config,
+    });
+    expect(trustedHeaders["Access-Control-Allow-Credentials"]).toBeUndefined();
   });
 });

@@ -25,6 +25,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import { AutomationService } from "./automation/Services/AutomationService";
 import { authErrorResponse, makeEffectAuthRequest } from "./auth/http";
+import { WEBSOCKET_TOKEN_QUERY_PARAM } from "./auth/Layers/ServerAuth";
 import { ServerAuth } from "./auth/Services/ServerAuth";
 import { SessionCredentialService } from "./auth/Services/SessionCredentialService";
 import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
@@ -1210,8 +1211,21 @@ export const websocketRpcRouteLayer = Layer.effectDiscard(
         const serverAuth = yield* ServerAuth;
         const sessions = yield* SessionCredentialService;
         const url = HttpServerRequest.toURL(request);
+        if (!url) {
+          return HttpServerResponse.text("Forbidden", { status: 403 });
+        }
+        const legacyToken = url.searchParams.get("token");
+        const websocketToken = url.searchParams.get(WEBSOCKET_TOKEN_QUERY_PARAM);
+        // An explicit token (ws-token or legacy token query param) is bearer-derived
+        // proof of authorization, not an ambient credential a browser attaches
+        // automatically. Origin-based CSRF checks exist to guard ambient-cookie
+        // auth; they add nothing for a connection that already proves itself via a
+        // token, and would otherwise block legitimate cross-origin multi-host
+        // clients (e.g. a phone browser on origin A pairing/connecting to host B).
+        // Token-less/cookie-based connections remain origin-gated as before.
+        const hasExplicitToken = Boolean(legacyToken?.trim()) || Boolean(websocketToken?.trim());
         if (
-          !url ||
+          !hasExplicitToken &&
           shouldRejectUntrustedRequestOrigin({
             rawOrigin: request.headers.origin,
             requestOrigin: url.origin,
@@ -1220,7 +1234,6 @@ export const websocketRpcRouteLayer = Layer.effectDiscard(
         ) {
           return HttpServerResponse.text("Forbidden", { status: 403 });
         }
-        const legacyToken = url.searchParams.get("token");
         const authenticatedSession =
           !config.authToken || legacyToken === config.authToken
             ? null
