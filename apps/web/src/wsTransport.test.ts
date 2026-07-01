@@ -6,7 +6,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WS_CHANNELS } from "@t3tools/contracts";
 
-import { computeReconnectDelayMs, shouldKeepServerLifecycleStream, WsTransport } from "./wsTransport";
+import {
+  computeReconnectDelayMs,
+  isConnectionLevelStreamError,
+  shouldKeepServerLifecycleStream,
+  WsTransport,
+} from "./wsTransport";
 
 type WsEventType = "open" | "message" | "close" | "error";
 type WsListener = (event?: { data?: unknown }) => void;
@@ -150,6 +155,13 @@ describe("WsTransport", () => {
     transport.dispose();
 
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("classifies connection-level stream errors by RpcClientError tag", () => {
+    expect(isConnectionLevelStreamError({ _tag: "RpcClientError" })).toBe(true);
+    expect(isConnectionLevelStreamError({ _tag: "WsRpcError", message: "resync" })).toBe(false);
+    expect(isConnectionLevelStreamError(new Error("boom"))).toBe(false);
+    expect(isConnectionLevelStreamError(null)).toBe(false);
   });
 
   it("computes bounded jittered reconnect delays", () => {

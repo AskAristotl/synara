@@ -121,6 +121,17 @@ const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 15_000;
 const RECONNECT_UNREACHABLE_AFTER_FAILURES = 2;
 
+// The server intentionally FAILS a single stream to force a resubscribe (e.g.
+// slow-subscriber buffer overflow → fresh snapshot). Only errors from the RPC
+// client itself indicate the connection is gone; everything else is stream-local.
+export function isConnectionLevelStreamError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { _tag?: unknown })._tag === "RpcClientError"
+  );
+}
+
 // Exponential backoff with jitter in [cap/2, cap): concurrent clients spread
 // their redials instead of stampeding a just-restarted host.
 export function computeReconnectDelayMs(
@@ -681,6 +692,7 @@ export class WsTransport {
     restart?: (() => void) | undefined,
   ): void {
     if (this.streamCleanups.has(key)) return;
+    this.stoppingStreams.delete(key);
     const runnableStream = stream as Stream.Stream<T, WsTransportRpcError, never>;
     const cancel = this.requireRuntime().runCallback(
       Stream.runForEach(runnableStream, (event) => Effect.sync(() => listener(event))),
@@ -693,22 +705,33 @@ export class WsTransport {
           if (wasStoppedIntentionally || this.disposed) {
             return;
           }
-          if (restart && Exit.isFailure(exit)) {
-            window.setTimeout(
-              () => {
-                if (!this.disposed && !this.streamCleanups.has(key)) {
-                  void this.reconnect()
-                    .then(() => restart())
-                    .catch((error) => console.warn("WebSocket RPC stream reconnect failed", error));
-                }
-              },
-              Cause.hasInterruptsOnly(exit.cause) ? 0 : 500,
-            );
+          if (!Exit.isFailure(exit)) {
             return;
           }
-          if (Exit.isFailure(exit) && !this.disposed && !Cause.hasInterruptsOnly(exit.cause)) {
-            console.warn("WebSocket RPC stream failed", causeToError(exit.cause));
+          if (!restart) {
+            if (!Cause.hasInterruptsOnly(exit.cause)) {
+              console.warn("WebSocket RPC stream failed", causeToError(exit.cause));
+            }
+            return;
           }
+          const interruptedOnly = Cause.hasInterruptsOnly(exit.cause);
+          const connectionLevel =
+            interruptedOnly || isConnectionLevelStreamError(Cause.squash(exit.cause));
+          setTimeout(
+            () => {
+              if (this.disposed || this.streamCleanups.has(key)) return;
+              if (connectionLevel) {
+                void this.reconnect()
+                  .then(() => restart())
+                  .catch((error) => console.warn("WebSocket RPC stream reconnect failed", error));
+              } else {
+                // Stream-local failure (e.g. server-initiated snapshot resync):
+                // the socket is healthy, so just resubscribe this one stream.
+                restart();
+              }
+            },
+            interruptedOnly ? 0 : 500,
+          );
         },
       },
     );
