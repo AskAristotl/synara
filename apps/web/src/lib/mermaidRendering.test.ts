@@ -91,6 +91,44 @@ describe("mermaidRendering", () => {
     expect(renderMock).toHaveBeenCalledTimes(3);
   });
 
+  it("repairs a diagram whose label starts with backticks and renders it", async () => {
+    const code = 'flowchart LR\n  A["```fence"] --> B["x"]';
+    // Original (backtick) source fails to parse; the escaped copy parses.
+    parseMock.mockImplementation((text: string) =>
+      text.includes("`") ? Promise.reject(new Error("Lexical error")) : Promise.resolve(true),
+    );
+    renderMock.mockResolvedValue({ svg: "<svg>repaired</svg>" });
+
+    const svg = await getMermaidSvgPromise(code, "default");
+
+    expect(svg).toBe("<svg>repaired</svg>");
+    const renderedSource = renderMock.mock.calls.at(-1)?.[1] as string;
+    expect(renderedSource).toContain("&#96;");
+    expect(renderedSource).not.toContain("`");
+  });
+
+  it("does not rewrite a diagram that already parses even if it has backticks", async () => {
+    const code = 'flowchart LR\n  A["`bold`"] --> B["x"]';
+    parseMock.mockResolvedValue(true);
+    renderMock.mockResolvedValue({ svg: "<svg>ok</svg>" });
+
+    await getMermaidSvgPromise(code, "default");
+
+    const renderedSource = renderMock.mock.calls.at(-1)?.[1] as string;
+    expect(renderedSource).toContain("`");
+    expect(renderedSource).not.toContain("&#96;");
+  });
+
+  it("surfaces the original parse error when the backtick repair also fails", async () => {
+    const code = 'flowchart LR\n  A["```x"] --> B[';
+    parseMock.mockImplementation((text: string) =>
+      Promise.reject(new Error(text.includes("&#96;") ? "repaired error" : "original error")),
+    );
+
+    await expect(getMermaidSvgPromise(code, "default")).rejects.toThrow("original error");
+    expect(renderMock).not.toHaveBeenCalled();
+  });
+
   it("serializes concurrent diagrams so parse+render never overlap", async () => {
     parseMock.mockResolvedValue(true);
     let active = 0;

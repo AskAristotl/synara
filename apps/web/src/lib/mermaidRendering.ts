@@ -92,18 +92,48 @@ function serializeMermaidWork<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
+// Theme per-diagram via an init directive so concurrent light/dark renders never
+// race on mermaid's global config. Cache key already includes the theme.
+function withThemeDirective(code: string, theme: MermaidTheme): string {
+  return `%%{init: {"theme":"${theme}"}}%%\n${code}`;
+}
+
+// Mermaid reads a backtick that opens a label as its markdown-string syntax, so a
+// literal backtick at the start of a label (common when a diagram describes code
+// or fenced blocks) throws a lexical error. HTML-entity-encoding backticks makes
+// mermaid render them as literal backticks instead. Returns null when there is
+// nothing to repair, so callers can tell "no repair applies" from "repaired".
+function repairMermaidSource(code: string): string | null {
+  if (!code.includes("`")) return null;
+  return code.replaceAll("`", "&#96;");
+}
+
 async function renderMermaidToSvg(
   mermaid: MermaidModule,
   code: string,
   theme: MermaidTheme,
 ): Promise<string> {
-  // Theme per-diagram via an init directive so concurrent light/dark renders never
-  // race on mermaid's global config. Cache key already includes the theme.
-  const themed = `%%{init: {"theme":"${theme}"}}%%\n${code}`;
   return serializeMermaidWork(async () => {
-    // Throws on invalid syntax; the caller lets the rejection reach the error
-    // boundary. Not retried — a syntax error is deterministic.
-    await mermaid.parse(themed);
+    // Parse the diagram as authored. `parse` throws on invalid syntax; a clean
+    // diagram is never rewritten. Not retried — a syntax error is deterministic.
+    let source = withThemeDirective(code, theme);
+    try {
+      await mermaid.parse(source);
+    } catch (parseError) {
+      // Last-resort repair, ONLY after the original already failed: retry with
+      // backticks escaped. This can never regress a diagram that parsed cleanly.
+      const repaired = repairMermaidSource(code);
+      if (repaired === null) throw parseError;
+      const repairedSource = withThemeDirective(repaired, theme);
+      try {
+        await mermaid.parse(repairedSource);
+      } catch {
+        // The repair didn't help — surface the ORIGINAL error so the source
+        // fallback reflects what the author actually wrote.
+        throw parseError;
+      }
+      source = repairedSource;
+    }
     // Retry the render phase: a transient failure (e.g. concurrent cold-start
     // config race) otherwise sticks the block on its source fallback until the
     // component remounts. A clean parse means the diagram is valid, so a render
@@ -112,7 +142,7 @@ async function renderMermaidToSvg(
     for (let attempt = 1; attempt <= MERMAID_RENDER_ATTEMPTS; attempt += 1) {
       renderCounter += 1;
       try {
-        const { svg } = await mermaid.render(`synara-mermaid-${renderCounter}`, themed);
+        const { svg } = await mermaid.render(`synara-mermaid-${renderCounter}`, source);
         return svg;
       } catch (error) {
         lastError = error;
