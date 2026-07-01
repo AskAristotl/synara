@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Schema } from "effect";
 
+import { SubAgentApprovalMode } from "./baseSchemas";
 import {
-  SubAgentApprovalMode,
   SubAgentResult,
   SubAgentResultDiff,
   SubAgentSendMessageInput,

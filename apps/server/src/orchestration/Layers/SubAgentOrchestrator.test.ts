@@ -544,6 +544,9 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
       expect(createCommand.subagentRole).toBeNull();
       expect(createCommand.subagentNickname).toBeNull();
       expect(createCommand.subagentAgentId).toBe(result.agentId);
+      // `approval` is omitted; the schema defaults it to "auto" (Task 0.1),
+      // which spawn stores verbatim as the child's recorded approval policy.
+      expect(createCommand.subagentApproval).toBe("auto");
       expect(createCommand.envMode).toBe("local");
       expect(createCommand.branch).toBeNull();
       expect(createCommand.worktreePath).toBeNull();
@@ -658,7 +661,57 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
     }
   });
 
-  it("maps approval 'ask-human' to runtimeMode 'approval-required'", async () => {
+  it("maps approval 'auto' to runtimeMode 'full-access' and stores subagentApproval 'auto'", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+      approval: "auto",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.runtimeMode).toBe("full-access");
+      expect(createCommand.subagentApproval).toBe("auto");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("maps approval 'read-only' to runtimeMode 'approval-required' (Task 5.1: CHANGED from full-access) and stores subagentApproval 'read-only'", async () => {
+    const { runtime, commands } = buildHarness({ available: true });
+    const caller = makeCaller();
+    const input = decodeSpawnInput({
+      provider: "codex",
+      task: "validate",
+      workspace: "share",
+      approval: "read-only",
+    });
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      await runtime.runPromise(orchestrator.spawn(caller, input));
+
+      const createCommand = commands[0];
+      if (createCommand?.type !== "thread.create") {
+        throw new Error("expected the first dispatched command to be thread.create");
+      }
+      expect(createCommand.runtimeMode).toBe("approval-required");
+      expect(createCommand.subagentApproval).toBe("read-only");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("maps approval 'ask-human' to runtimeMode 'approval-required' and stores subagentApproval 'ask-human'", async () => {
     const { runtime, commands } = buildHarness({ available: true });
     const caller = makeCaller();
     const input = decodeSpawnInput({
@@ -677,6 +730,7 @@ describe("SubAgentOrchestrator.spawn (share-cwd)", () => {
         throw new Error("expected the first dispatched command to be thread.create");
       }
       expect(createCommand.runtimeMode).toBe("approval-required");
+      expect(createCommand.subagentApproval).toBe("ask-human");
     } finally {
       await runtime.dispose();
     }

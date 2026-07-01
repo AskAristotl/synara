@@ -21,6 +21,7 @@ import {
   PositiveInt,
   ProjectId,
   ProviderItemId,
+  SubAgentApprovalMode,
   ThreadId,
   ThreadMarkerId,
   TrimmedNonEmptyString,
@@ -626,6 +627,9 @@ export const OrchestrationThread = Schema.Struct({
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  subagentApproval: Schema.optional(Schema.NullOr(SubAgentApprovalMode)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
   forkSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
@@ -691,6 +695,9 @@ export const OrchestrationThreadShell = Schema.Struct({
     Schema.withDecodingDefault(() => null),
   ),
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  subagentApproval: Schema.optional(Schema.NullOr(SubAgentApprovalMode)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
   forkSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)).pipe(
@@ -831,6 +838,9 @@ const ThreadCreateCommand = Schema.Struct({
     Schema.withDecodingDefault(() => null),
   ),
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  subagentApproval: Schema.optional(Schema.NullOr(SubAgentApprovalMode)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
   lastKnownPr: Schema.optional(Schema.NullOr(OrchestrationThreadPullRequest)).pipe(
@@ -1439,6 +1449,9 @@ export const ThreadCreatedPayload = Schema.Struct({
     Schema.withDecodingDefault(() => null),
   ),
   subagentRole: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  subagentApproval: Schema.optional(Schema.NullOr(SubAgentApprovalMode)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
   forkSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)).pipe(

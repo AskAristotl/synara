@@ -26,6 +26,7 @@ import type {
   ProviderInteractionMode,
   ProjectKind,
   RuntimeMode,
+  SubAgentApprovalMode,
   ThreadEnvironmentMode,
 } from "@t3tools/contracts";
 
@@ -201,6 +202,7 @@ export interface Thread extends ThreadWorkspaceState {
   subagentAgentId?: string | null;
   subagentNickname?: string | null;
   subagentRole?: string | null;
+  subagentApproval?: SubAgentApprovalMode | null;
   forkSourceThreadId?: ThreadId | null;
   sidechatSourceThreadId?: ThreadId | null;
   handoff?: ThreadHandoff | null;
@@ -237,6 +239,7 @@ export interface ThreadShell extends ThreadWorkspaceState {
   subagentAgentId?: string | null;
   subagentNickname?: string | null;
   subagentRole?: string | null;
+  subagentApproval?: SubAgentApprovalMode | null;
   forkSourceThreadId?: ThreadId | null;
   sidechatSourceThreadId?: ThreadId | null;
   handoff?: ThreadHandoff | null;
@@ -276,6 +279,7 @@ export interface SidebarThreadSummary {
   subagentAgentId?: string | null;
   subagentNickname?: string | null;
   subagentRole?: string | null;
+  subagentApproval?: SubAgentApprovalMode | null;
   latestUserMessageAt: string | null;
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;

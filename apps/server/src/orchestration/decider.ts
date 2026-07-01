@@ -413,6 +413,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           subagentAgentId: command.subagentAgentId,
           subagentNickname: command.subagentNickname,
           subagentRole: command.subagentRole,
+          subagentApproval: command.subagentApproval,
           forkSourceThreadId: null,
           lastKnownPr: command.lastKnownPr,
           handoff: null,
@@ -494,6 +495,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           subagentAgentId: null,
           subagentNickname: null,
           subagentRole: null,
+          subagentApproval: null,
           forkSourceThreadId: null,
           handoff: {
             sourceThreadId: command.sourceThreadId,
@@ -598,6 +600,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           subagentAgentId: null,
           subagentNickname: null,
           subagentRole: null,
+          subagentApproval: null,
           forkSourceThreadId: command.sourceThreadId,
           sidechatSourceThreadId: command.sidechatSourceThreadId,
           handoff: null,

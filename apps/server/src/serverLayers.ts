@@ -11,6 +11,7 @@ import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationRe
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
+import { SubAgentApprovalResolverLive } from "./orchestration/Layers/SubAgentApprovalResolver";
 import { SubAgentOrchestratorLive } from "./orchestration/Layers/SubAgentOrchestrator";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer";
@@ -74,6 +75,13 @@ export function makeServerRuntimeServicesLayer() {
   const threadDeletionReactorLayer = ThreadDeletionReactorLive.pipe(
     Layer.provideMerge(OrchestrationLayerLive),
     Layer.provideMerge(TerminalLayerLive),
+  );
+  // Engine + projection come from OrchestrationLayerLive, mirroring
+  // threadDeletionReactorLayer above -- the resolver only needs to observe
+  // the domain-event stream and read/dispatch through the engine, no other
+  // service.
+  const subAgentApprovalResolverLayer = SubAgentApprovalResolverLive.pipe(
+    Layer.provideMerge(OrchestrationLayerLive),
   );
   // Engine + projection come from OrchestrationLayerLive, mirroring the sibling
   // reactors above. `GitCore` provisions isolated worktrees for
@@ -141,6 +149,7 @@ export function makeServerRuntimeServicesLayer() {
     automationRunReactorLayer,
     orchestrationReactorLayer,
     threadDeletionReactorLayer,
+    subAgentApprovalResolverLayer,
     subAgentOrchestratorLayer,
     subAgentMcpServerLayer,
     SessionTokenRegistryLive,

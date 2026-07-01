@@ -64,3 +64,11 @@ export const ApprovalRequestId = makeEntityId("ApprovalRequestId");
 export type ApprovalRequestId = typeof ApprovalRequestId.Type;
 export const CheckpointRef = makeEntityId("CheckpointRef");
 export type CheckpointRef = typeof CheckpointRef.Type;
+
+// Lives here (rather than in ./subagent, its conceptual home) so both
+// ./orchestration (OrchestrationThread/ThreadCreateCommand, Task 5.1) and
+// ./subagent (SubAgentSpawnInput) can depend on it without a cycle: ./subagent
+// already imports ProviderKind from ./orchestration, so ./orchestration can't
+// import back from ./subagent.
+export const SubAgentApprovalMode = Schema.Literals(["auto", "ask-human", "read-only"]);
+export type SubAgentApprovalMode = typeof SubAgentApprovalMode.Type;

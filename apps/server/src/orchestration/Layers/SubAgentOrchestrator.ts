@@ -126,18 +126,26 @@ function resolveSubAgentModel(provider: ProviderKind, model: string | undefined)
 }
 
 /**
- * Map a spawn's `approval` knob to a thread `runtimeMode`.
+ * Map a spawn's `approval` knob to a thread `runtimeMode` (Task 5.1).
  *
- * TODO(Task 5.1): real approval resolution. `auto` and `read-only` both run
- * `full-access` for now (no sandboxed read-only runtime yet); `ask-human` uses
- * `approval-required` so requests surface instead of being auto-resolved.
+ * `auto` runs `full-access` -- the provider auto-allows, so approval requests
+ * rarely fire; {@link SubAgentApprovalResolverLive} auto-accepts any that do.
+ * `read-only` and `ask-human` both run `approval-required` so writes/exec
+ * actually produce approval requests (providers do not prompt for plain
+ * reads under `approval-required` -- they proceed without a request, which
+ * is what makes `read-only` effectively read-only): the resolver
+ * auto-declines every request for `read-only`, and leaves every request for
+ * a human to answer for `ask-human`. `read-only` mapping to `approval-required`
+ * is a CHANGE from Phase 1, which mapped it to `full-access` pending this
+ * resolver.
+ *
  * Accepts `undefined` because `SubAgentSpawnInput.approval`'s static `.Type`
  * still carries `| undefined` from `Schema.optional` even though
  * `Schema.withDecodingDefault` guarantees a runtime value (`"auto"`) — treat
  * `undefined` the same as `"auto"`.
  */
 function runtimeModeForApproval(approval: SubAgentApprovalMode | undefined): RuntimeMode {
-  return approval === "ask-human" ? "approval-required" : "full-access";
+  return approval === "auto" || approval === undefined ? "full-access" : "approval-required";
 }
 
 /** A concise, non-empty thread title derived from the spawn's labels/task. */
@@ -599,6 +607,7 @@ export const SubAgentOrchestratorLive = Layer.effect(
             subagentAgentId: childThreadId,
             subagentRole: input.role ?? null,
             subagentNickname: input.nickname ?? null,
+            subagentApproval: input.approval ?? "auto",
             createdAt: now,
           })
           .pipe(Effect.mapError(toDispatchError));

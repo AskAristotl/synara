@@ -1,5 +1,11 @@
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  NonNegativeInt,
+  PositiveInt,
+  SubAgentApprovalMode,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas";
 import { ProviderKind } from "./orchestration";
 
 /**
@@ -15,8 +21,8 @@ import { ProviderKind } from "./orchestration";
 export const SubAgentWorkspaceMode = Schema.Literals(["share", "worktree"]);
 export type SubAgentWorkspaceMode = typeof SubAgentWorkspaceMode.Type;
 
-export const SubAgentApprovalMode = Schema.Literals(["auto", "ask-human", "read-only"]);
-export type SubAgentApprovalMode = typeof SubAgentApprovalMode.Type;
+// SubAgentApprovalMode itself lives in ./baseSchemas (see the comment there)
+// to avoid a cycle with ./orchestration; re-imported above for local use.
 
 export const SubAgentWaitMode = Schema.Literals(["all", "any"]);
 export type SubAgentWaitMode = typeof SubAgentWaitMode.Type;

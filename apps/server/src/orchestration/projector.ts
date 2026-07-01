@@ -331,6 +331,7 @@ export function projectEvent(
             subagentAgentId: payload.subagentAgentId,
             subagentNickname: payload.subagentNickname,
             subagentRole: payload.subagentRole,
+            subagentApproval: payload.subagentApproval,
             forkSourceThreadId: payload.forkSourceThreadId,
             sidechatSourceThreadId: payload.sidechatSourceThreadId,
             lastKnownPr: payload.lastKnownPr ?? null,
