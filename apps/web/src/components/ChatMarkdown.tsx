@@ -46,6 +46,7 @@ import {
 import { LinkChipIcon } from "./LinkChipIcon";
 import { InlineMentionChip } from "./chat/InlineMentionChip";
 import { IconButton } from "./ui/icon-button";
+import { CodeHighlightErrorBoundary } from "./chat/CodeHighlightErrorBoundary";
 
 const EXTERNAL_HTTP_HREF_PATTERN = /^https?:\/\//i;
 // Trailing `:line` / `:line:col` position suffix on a resolved file link. Kept on
@@ -57,27 +58,6 @@ const MARKDOWN_EXTERNAL_LINK_ICON_CLASS_NAME = `${COMPOSER_INLINE_CHIP_TOKEN_ICO
 
 function isExternalHttpHref(href: string | undefined): href is string {
   return typeof href === "string" && EXTERNAL_HTTP_HREF_PATTERN.test(href);
-}
-
-class CodeHighlightErrorBoundary extends React.Component<
-  { fallback: ReactNode; children: ReactNode },
-  { hasError: boolean }
-> {
-  constructor(props: { fallback: ReactNode; children: ReactNode }) {
-    super(props);
-    this.state = { hasError: false };
-  }
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  override render() {
-    if (this.state.hasError) {
-      return this.props.fallback;
-    }
-    return this.props.children;
-  }
 }
 
 interface ChatMarkdownProps {
