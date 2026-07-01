@@ -788,6 +788,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     get streamDomainEvents(): OrchestrationEngineShape["streamDomainEvents"] {
       return Stream.fromPubSub(eventPubSub);
     },
+    // `PubSub.subscribe` registers the subscription synchronously when this
+    // effect is run (an `Effect.acquireRelease` around a plain `Effect.sync`)
+    // — no deferred "first pull" step like `Stream.fromPubSub` has. See the
+    // `subscribeDomainEvents` doc comment on `OrchestrationEngineShape`.
+    subscribeDomainEvents: PubSub.subscribe(eventPubSub),
   } satisfies OrchestrationEngineShape;
 });
 

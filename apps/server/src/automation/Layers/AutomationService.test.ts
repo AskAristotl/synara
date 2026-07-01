@@ -374,6 +374,7 @@ const orchestrationEngine = {
       updatedAt: now,
     }),
   streamDomainEvents: Stream.empty,
+  subscribeDomainEvents: Effect.die(new Error("subscribeDomainEvents unused in test")),
 } satisfies OrchestrationEngineShape;
 
 const projectionSnapshotQuery = {

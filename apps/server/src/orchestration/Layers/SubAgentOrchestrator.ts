@@ -37,7 +37,7 @@ import {
   type SubAgentStatus,
   ThreadId,
 } from "@t3tools/contracts";
-import { Cause, Deferred, Duration, Effect, Layer, Option, Stream } from "effect";
+import { Deferred, Duration, Effect, Layer, Option, PubSub } from "effect";
 
 import { getDefaultModel } from "@t3tools/shared/model";
 import { clampWaitSeconds, SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
@@ -387,25 +387,32 @@ export const SubAgentOrchestratorLive = Layer.effect(
             isResolved() ? Deferred.succeed(done, undefined) : Effect.succeed(false),
           );
 
-          // 1. Acquire the domain-event subscription BEFORE snapshotting so a
+          // 1. Subscribe to the domain-event PubSub BEFORE snapshotting so a
           //    terminal event that fires in the seed gap is not lost.
-          //    `Stream.toPull` runs the stream's "acquire" step (in production,
-          //    `PubSub.subscribe` — see `OrchestrationEngine.ts`'s
-          //    `streamDomainEvents` getter) synchronously and hands back a
-          //    repeatable pull effect; the subscription is registered right
-          //    here, before any `yield*` below can suspend this fiber. Nothing
-          //    published from this point on can be missed, because the
-          //    subscription (not our consumption of it) is what determines
-          //    what gets buffered.
+          //    `engine.subscribeDomainEvents` is `PubSub.subscribe` under the
+          //    hood (see `Layers/OrchestrationEngine.ts`), which registers
+          //    the subscription synchronously the moment this effect is
+          //    run — right here, before any `yield*` below can suspend this
+          //    fiber on a SQL read. This is deliberately NOT
+          //    `Stream.toPull(engine.streamDomainEvents)`: `streamDomainEvents`
+          //    is `Stream.fromPubSub`, and `Stream.toPull` on it defers the
+          //    actual `PubSub.subscribe` call inside an `Effect.suspend` that
+          //    only fires on the FIRST pull (see `effect`'s `Channel.unwrap`)
+          //    — which would happen inside the drain fiber forked in step 3,
+          //    AFTER the seed loop, so any event published during the seed
+          //    loop's SQL reads would be silently dropped. Subscribing here
+          //    instead means nothing published from this point on can be
+          //    missed: the subscription (not our later consumption of it) is
+          //    what determines what gets buffered.
           //
           //    Consumption is intentionally NOT started yet (step 3, after the
-          //    seed loop) even though it would be safe to do so eagerly: an
-          //    event applied before the seed loop has populated
+          //    seed loop) even though the subscription itself is already
+          //    live: an event applied before the seed loop has populated
           //    `observedRunning` for an already-running child would see
           //    `hasRun === false` and wrongly fail to resolve it. Draining
           //    after the seed loop guarantees every buffered event is applied
           //    against a fully-seeded `observedRunning`/`outcomes` state.
-          const pullDomainEvents = yield* Stream.toPull(engine.streamDomainEvents);
+          const domainEventSubscription = yield* engine.subscribeDomainEvents;
 
           // 2. Seed each child's current state. A child may already be terminal
           //    at seed time — resolve it immediately rather than hang.
@@ -421,14 +428,18 @@ export const SubAgentOrchestratorLive = Layer.effect(
             }
             const thread = threadOption.value;
             // Seed run-evidence, gating the idle/ready -> completed transition
-            // below: a non-null latestTurn is only ever created by a
-            // thread.session-set event with status "running" (see
-            // projector.ts's "thread.session-set" case), so it proves the
-            // session has run at least once; an assistant message is an
-            // independent signal for the same fact (the provider has produced
-            // output). Either is sufficient. A bare seed idle/starting with
-            // NEITHER — a freshly-spawned, not-yet-run child — has no run
-            // evidence and must NOT be mistaken for a finished turn.
+            // below: latestTurn starts null at thread.create (projector.ts's
+            // "thread.created" case) and is populated only as a byproduct of
+            // turn/checkpoint activity — not just a "running" thread.session-set,
+            // but also thread.turn-diff-completed, thread.reverted, and
+            // thread.conversation-rolled-back (see projector.ts) — none of
+            // which fire before the child's first turn has actually run. So a
+            // non-null latestTurn still proves the session has run at least
+            // once; an assistant message is an independent signal for the
+            // same fact (the provider has produced output). Either is
+            // sufficient. A bare seed idle/starting with NEITHER — a
+            // freshly-spawned, not-yet-run child — has no run evidence and
+            // must NOT be mistaken for a finished turn.
             const hasAssistantMessage = thread.messages.some(
               (message) => message.role === "assistant",
             );
@@ -447,21 +458,19 @@ export const SubAgentOrchestratorLive = Layer.effect(
           //    that raced the seed loop) are applied first, in order, followed
           //    by any future events. `{ startImmediately: true }` starts this
           //    fiber synchronously (no scheduler round-trip) since the seed
-          //    loop has already run, so it is always safe here.
+          //    loop has already run, so it is always safe here. The loop needs
+          //    no explicit exit condition: `Effect.scoped` (wrapping this
+          //    whole generator) interrupts this forked fiber — and tears down
+          //    the subscription acquired in step 1 — the moment `wait`
+          //    returns, whether via resolution or timeout.
           yield* Effect.forkScoped(
             Effect.gen(function* () {
               while (true) {
-                const events = yield* pullDomainEvents;
-                for (const event of events) {
-                  applyDomainEvent(event, targetIds, applySession);
-                  yield* signalIfResolved;
-                }
+                const event = yield* PubSub.take(domainEventSubscription);
+                applyDomainEvent(event, targetIds, applySession);
+                yield* signalIfResolved;
               }
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Cause.isDone(cause) ? Effect.void : Effect.failCause(cause),
-              ),
-            ),
+            }),
             { startImmediately: true },
           );
 

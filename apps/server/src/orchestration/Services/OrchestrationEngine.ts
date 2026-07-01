@@ -16,7 +16,7 @@ import type {
   OrchestrationReadModel,
 } from "@t3tools/contracts";
 import { ServiceMap } from "effect";
-import type { Effect, Stream } from "effect";
+import type { Effect, PubSub, Scope, Stream } from "effect";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
@@ -74,6 +74,27 @@ export interface OrchestrationEngineShape {
    * This is a hot runtime stream (new events only), not a historical replay.
    */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
+
+  /**
+   * Subscribe to domain events eagerly.
+   *
+   * Unlike `streamDomainEvents` (a `Stream.fromPubSub` description whose
+   * underlying `PubSub.subscribe` is deferred until the stream is first
+   * pulled — see `Stream.toPull` / `Channel.unwrap`), this effect registers
+   * the `PubSub` subscription synchronously the moment it is run. Consumers
+   * that must not miss an event published between "start listening" and
+   * "finish some other setup work" (e.g. `SubAgentOrchestrator.wait`, which
+   * subscribes before seeding per-child state from a SQL read) should
+   * `yield*` this first and drain the returned subscription afterward,
+   * rather than deferring subscription via `Stream.toPull`.
+   *
+   * Scoped: the subscription is torn down when the acquiring scope closes.
+   */
+  readonly subscribeDomainEvents: Effect.Effect<
+    PubSub.Subscription<OrchestrationEvent>,
+    never,
+    Scope.Scope
+  >;
 }
 
 /**

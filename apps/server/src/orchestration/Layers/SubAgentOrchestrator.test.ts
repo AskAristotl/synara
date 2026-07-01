@@ -13,7 +13,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
-import { Effect, Layer, ManagedRuntime, Option, Queue, Schema, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, PubSub, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ProviderUnsupportedError } from "../../provider/Errors.ts";
@@ -162,20 +162,30 @@ function turnDiffCompletedEvent(threadId: ThreadId): OrchestrationEvent {
 }
 
 /**
- * Harness for `wait`: a recording engine whose `streamDomainEvents` is backed by
- * an unbounded Queue the test can push into (retained delivery to the single
- * `wait` consumer keeps the test deterministic regardless of subscribe timing),
- * plus a mutable thread map behind ProjectionSnapshotQuery.
+ * Harness for `wait`: a recording engine whose event delivery is backed by a
+ * real `PubSub` with a generous replay buffer, so `wait`'s subscription
+ * (however late it starts relative to a test's `pushEvent` calls) still
+ * receives every event a test pushed beforehand -- every test in this file
+ * publishes events BEFORE calling `wait`, and the replay buffer keeps that
+ * publish-then-wait ordering deterministic regardless of subscribe timing.
+ * `streamDomainEvents` and `subscribeDomainEvents` share the same underlying
+ * PubSub, mirroring the real engine (`Layers/OrchestrationEngine.ts`).
+ *
+ * Contrast with `buildMidSeedWaitHarness` below, which deliberately uses a
+ * PubSub with NO replay buffer to exercise real subscribe-timing semantics --
+ * that is the one that can distinguish the eager-subscribe fix from the
+ * `Stream.toPull` bug it replaces.
  */
 function buildWaitHarness() {
-  const eventQueue = Effect.runSync(Queue.unbounded<OrchestrationEvent>());
+  const eventPubSub = Effect.runSync(PubSub.unbounded<OrchestrationEvent>({ replay: 16 }));
   const threads = new Map<string, OrchestrationThread>();
   const engine: OrchestrationEngineShape = {
     readEvents: () => Stream.empty,
     getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
     dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
     repairState: () => Effect.die(new Error("repairState unused in test")),
-    streamDomainEvents: Stream.fromQueue(eventQueue),
+    streamDomainEvents: Stream.fromPubSub(eventPubSub),
+    subscribeDomainEvents: PubSub.subscribe(eventPubSub),
   };
   const layer = SubAgentOrchestratorLive.pipe(
     Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
@@ -187,9 +197,91 @@ function buildWaitHarness() {
     threads.set(thread.id, thread);
   };
   const pushEvent = (event: OrchestrationEvent): void => {
-    Effect.runSync(Queue.offer(eventQueue, event));
+    Effect.runSync(PubSub.publish(eventPubSub, event));
   };
   return { runtime, setThread, pushEvent };
+}
+
+/**
+ * A ProjectionSnapshotQuery double that, on the FIRST read of a designated
+ * thread id, runs `onFirstRead` before returning the (still-seeded,
+ * non-terminal) thread snapshot -- simulating a domain event landing on the
+ * wire WHILE `wait`'s seed loop is mid-flight doing its SQL-equivalent read
+ * for that exact child. Subsequent reads (e.g. `wait`'s final result-building
+ * pass) return the thread unmodified, with no further side effect.
+ */
+function createMidSeedProjectionStub(
+  threads: ReadonlyMap<string, OrchestrationThread>,
+  midSeedThreadId: ThreadId,
+  onFirstRead: () => void,
+): ProjectionSnapshotQueryShape {
+  const unused = () => Effect.die(new Error("projection snapshot method unused in test"));
+  let firstReadDone = false;
+  const getThreadDetailById: ProjectionSnapshotQueryShape["getThreadDetailById"] = (threadId) =>
+    Effect.sync(() => {
+      if (threadId === midSeedThreadId && !firstReadDone) {
+        firstReadDone = true;
+        onFirstRead();
+      }
+      const thread = threads.get(threadId);
+      return thread ? Option.some(thread) : Option.none();
+    });
+  return {
+    getCommandReadModel: unused,
+    getSnapshot: unused,
+    getCounts: unused,
+    getSnapshotSequence: unused,
+    getShellSnapshot: unused,
+    getActiveProjectByWorkspaceRoot: unused,
+    getProjectShellById: unused,
+    getFirstActiveThreadIdByProjectId: unused,
+    getThreadCheckpointContext: unused,
+    getFullThreadDiffContext: unused,
+    getThreadShellById: unused,
+    findSyntheticSubagentParentThread: unused,
+    getThreadDetailById,
+    getThreadDetailSnapshotById: unused,
+  };
+}
+
+/**
+ * Harness for the subscribe-before-seed regression test: a REAL, non-replay
+ * `PubSub` (unlike `buildWaitHarness`'s replay-buffered one) backs both
+ * `streamDomainEvents` and `subscribeDomainEvents`, so a subscriber only
+ * receives events published AFTER `PubSub.subscribe` actually ran for it --
+ * see the empirically-verified semantics in the `wait` step-1 comment in
+ * `Layers/SubAgentOrchestrator.ts`. `ProjectionSnapshotQuery.getThreadDetailById`
+ * publishes the target child's terminal event on its first invocation (the
+ * seed loop's read for that child), landing it squarely in the "seed gap"
+ * between subscribing and finishing the seed loop.
+ */
+function buildMidSeedWaitHarness(midSeedThreadId: ThreadId, midSeedEvent: OrchestrationEvent) {
+  const eventPubSub = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
+  const threads = new Map<string, OrchestrationThread>();
+  const publishEvent = (event: OrchestrationEvent): void => {
+    Effect.runSync(PubSub.publish(eventPubSub, event));
+  };
+  const engine: OrchestrationEngineShape = {
+    readEvents: () => Stream.empty,
+    getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
+    dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
+    repairState: () => Effect.die(new Error("repairState unused in test")),
+    streamDomainEvents: Stream.fromPubSub(eventPubSub),
+    subscribeDomainEvents: PubSub.subscribe(eventPubSub),
+  };
+  const projection = createMidSeedProjectionStub(threads, midSeedThreadId, () =>
+    publishEvent(midSeedEvent),
+  );
+  const layer = SubAgentOrchestratorLive.pipe(
+    Layer.provide(Layer.succeed(OrchestrationEngineService, engine)),
+    Layer.provide(Layer.succeed(ProviderDiscoveryService, createDiscoveryStub(true))),
+    Layer.provide(Layer.succeed(ProjectionSnapshotQuery, projection)),
+  );
+  const runtime = ManagedRuntime.make(layer);
+  const setThread = (thread: OrchestrationThread): void => {
+    threads.set(thread.id, thread);
+  };
+  return { runtime, setThread };
 }
 
 function resultById<T extends { readonly agentId: string }>(
@@ -221,6 +313,7 @@ function createRecordingEngine() {
       }),
     repairState: () => Effect.die(new Error("repairState unused in test")),
     streamDomainEvents: Stream.empty,
+    subscribeDomainEvents: Effect.die(new Error("subscribeDomainEvents unused in test")),
   };
   return { engine, commands };
 }
@@ -758,6 +851,64 @@ describe("SubAgentOrchestrator.wait (terminal collection)", () => {
 
       expect(error).toBeInstanceOf(SubAgentError);
       expect(error.reason).toBe("unknown-agent");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("catches a terminal event published DURING the seed loop's read for that child (subscribe-before-seed)", async () => {
+    const child = ThreadId.makeUnsafe(randomUUID());
+    // The child's real running -> idle completion signal. `buildMidSeedWaitHarness`
+    // publishes this the INSTANT the seed loop calls getThreadDetailById(child) --
+    // i.e. squarely in the gap between "start listening" and "finish seeding" that
+    // `wait` step 1 exists to close. The harness's PubSub has no replay buffer, so
+    // this event only reaches a subscriber that was ALREADY listening when it was
+    // published.
+    const midSeedEvent = sessionSetEvent(
+      child,
+      makeSession(child, { status: "idle", activeTurnId: null }),
+    );
+    const { runtime, setThread } = buildMidSeedWaitHarness(child, midSeedEvent);
+    // The seed snapshot itself is still non-terminal ("running", active turn) --
+    // resolution must come from the mid-seed published event being caught by the
+    // eager subscription, not from the seed read itself.
+    setThread(
+      makeThread({
+        id: child,
+        messages: [
+          { role: "user", text: "go" },
+          { role: "assistant", text: "finished during seed" },
+        ],
+        session: makeSession(child, {
+          status: "running",
+          activeTurnId: TurnId.makeUnsafe(randomUUID()),
+        }),
+        latestTurnState: "running",
+      }),
+    );
+
+    try {
+      const orchestrator = await runtime.runPromise(Effect.service(SubAgentOrchestrator));
+      const startedAt = Date.now();
+      // timeoutSeconds clamps to a 1s floor. With subscribe-before-seed (the
+      // fix), the mid-seed event is buffered by the already-live subscription
+      // and applied by the drain fiber right after the seed loop, resolving
+      // "completed" almost immediately -- well under 1s. With the prior
+      // `Stream.toPull(engine.streamDomainEvents)` mechanism, the subscription
+      // isn't actually registered until the drain fiber's first pull (AFTER
+      // the seed loop), so this PubSub (no replay buffer) would have already
+      // dropped the event; `wait` would then block for the full 1s and fall
+      // through to "running". This is the assertion that distinguishes fixed
+      // from broken.
+      const results = await runtime.runPromise(
+        orchestrator.wait(decodeWaitInput({ agentIds: [child], mode: "all", timeoutSeconds: 1 })),
+      );
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.status).toBe("completed");
+      expect(results[0]?.finalMessage).toBe("finished during seed");
+      expect(elapsedMs).toBeLessThan(500);
     } finally {
       await runtime.dispose();
     }
