@@ -95,6 +95,12 @@ export interface AcpSessionRuntimeShape {
   readonly handleExtNotification: EffectAcpClient.AcpClientShape["handleExtNotification"];
   readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
   readonly getEvents: () => Stream.Stream<AcpParsedSessionEvent, never>;
+  // Monotonic count of parsed session/update events enqueued for the
+  // getEvents() consumer. Adapters snapshot it and wait until their own
+  // processed count catches up, so turn attribution stays open until every
+  // event received during the turn has actually been handled — immune to
+  // stream chunk buffering and in-flight handlers, unlike a queue-size probe.
+  readonly sessionUpdatesEnqueuedCount: Effect.Effect<number>;
   readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
   readonly getConfigOptions: Effect.Effect<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
   readonly prompt: (
@@ -174,6 +180,22 @@ const makeAcpSessionRuntime = (
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
+    // session/load can replay a large history before the consumer attaches; drop
+    // those notifications so they never accumulate in the unbounded queue. For
+    // resumed sessions the gate stays closed past start() and only opens once the
+    // adapter attaches a consumer via getEvents(), because the agent may keep
+    // replaying after replying to session/load. Plain mutable state (not a Ref)
+    // so getEvents() can open the gate synchronously at attach time.
+    let acceptingSessionUpdates = false;
+    // Counts every parsed event offered into eventQueue (see
+    // sessionUpdatesEnqueuedCount on the shape). Plain mutable state: single
+    // writer per offer, and readers only need a monotonic snapshot.
+    let sessionUpdatesEnqueued = 0;
+    const offerSessionEvent = (event: AcpParsedSessionEvent): Effect.Effect<void> =>
+      Effect.suspend(() => {
+        sessionUpdatesEnqueued += 1;
+        return Effect.asVoid(Queue.offer(eventQueue, event));
+      });
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -244,14 +266,27 @@ const makeAcpSessionRuntime = (
 
     const acp = ServiceMap.getUnsafe(acpContext, EffectAcpClient.AcpClient);
 
+    // The protocol layer offers every incoming notification into an unbounded
+    // raw queue (acp.raw.notifications) in addition to invoking the
+    // handleSessionUpdate callback. Nothing consumes that stream in this
+    // runtime, so a resumed session's replay would accumulate there without
+    // bound regardless of the accepting gate below — drain it for the
+    // runtime's lifetime. (handleSessionUpdate delivery is unaffected: it is
+    // driven by the callback path, not this queue.)
+    yield* Stream.runDrain(acp.raw.notifications).pipe(Effect.forkIn(runtimeScope));
+
     yield* acp.handleSessionUpdate((notification) =>
-      handleSessionUpdate({
-        queue: eventQueue,
-        modeStateRef,
-        toolCallsRef,
-        assistantSegmentRef,
-        params: notification,
-      }),
+      Effect.suspend(() =>
+        acceptingSessionUpdates
+          ? handleSessionUpdate({
+              offer: offerSessionEvent,
+              modeStateRef,
+              toolCallsRef,
+              assistantSegmentRef,
+              params: notification,
+            })
+          : Effect.void,
+      ),
     );
 
     const initializeClientCapabilities = {
@@ -420,6 +455,7 @@ const makeAcpSessionRuntime = (
         | EffectAcpSchema.LoadSessionResponse
         | EffectAcpSchema.NewSessionResponse
         | EffectAcpSchema.ResumeSessionResponse;
+      let resumedExistingSession = false;
       if (options.resumeSessionId) {
         const loadPayload = {
           sessionId: options.resumeSessionId,
@@ -432,9 +468,17 @@ const makeAcpSessionRuntime = (
           acp.agent.loadSession(loadPayload),
         ).pipe(Effect.exit);
         if (Exit.isSuccess(resumed)) {
+          // A resumed session may keep replaying history after session/load
+          // returns; keep dropping until getEvents() attaches a consumer so
+          // the replay cannot pile up in the unbounded queue.
           sessionId = options.resumeSessionId;
           sessionSetupResult = resumed.value;
+          resumedExistingSession = true;
         } else {
+          // Fresh fallback session: no replay risk, and agents may emit early
+          // session/update from inside session/new — accept from here so those
+          // buffer for the consumer instead of being dropped.
+          acceptingSessionUpdates = true;
           const createPayload = {
             cwd: options.cwd,
             mcpServers: options.mcpServers ?? [],
@@ -448,6 +492,9 @@ const makeAcpSessionRuntime = (
           sessionSetupResult = created;
         }
       } else {
+        // Fresh session: accept updates from before session/new so any early
+        // agent output emitted while the request is in flight is buffered.
+        acceptingSessionUpdates = true;
         const createPayload = {
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
@@ -463,6 +510,14 @@ const makeAcpSessionRuntime = (
 
       yield* Ref.set(modeStateRef, parseSessionModeState(sessionSetupResult));
       yield* Ref.set(configOptionsRef, sessionConfigOptionsFromSetup(sessionSetupResult));
+      // Fresh sessions accept session/update while session/new is in flight, and
+      // those events are already in the queue; resetting the merge/segment state
+      // they created would orphan their continuations (new segment ids, unmerged
+      // tool updates). Only the resumed replay-dropping path starts clean.
+      if (resumedExistingSession) {
+        yield* Ref.set(toolCallsRef, new Map());
+        yield* Ref.set(assistantSegmentRef, { nextSegmentIndex: 0 });
+      }
 
       const nextState = {
         sessionId,
@@ -522,7 +577,14 @@ const makeAcpSessionRuntime = (
       handleExtRequest: acp.handleExtRequest,
       handleExtNotification: acp.handleExtNotification,
       start: () => start,
-      getEvents: () => Stream.fromQueue(eventQueue),
+      getEvents: () => {
+        // Attaching a consumer opens the session/update gate: from here on the
+        // queue is drained, so accepting notifications can no longer grow it
+        // without bound (see acceptingSessionUpdates above).
+        acceptingSessionUpdates = true;
+        return Stream.fromQueue(eventQueue);
+      },
+      sessionUpdatesEnqueuedCount: Effect.sync(() => sessionUpdatesEnqueued),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload) =>
@@ -533,7 +595,7 @@ const makeAcpSessionRuntime = (
               ...payload,
             } satisfies EffectAcpSchema.PromptRequest;
             return closeActiveAssistantSegment({
-              queue: eventQueue,
+              offer: offerSessionEvent,
               assistantSegmentRef,
             }).pipe(
               Effect.andThen(
@@ -545,7 +607,7 @@ const makeAcpSessionRuntime = (
               ),
               Effect.tap(() =>
                 closeActiveAssistantSegment({
-                  queue: eventQueue,
+                  offer: offerSessionEvent,
                   assistantSegmentRef,
                 }),
               ),
@@ -604,13 +666,13 @@ function configOptionCurrentValueMatches(
 }
 
 const handleSessionUpdate = ({
-  queue,
+  offer,
   modeStateRef,
   toolCallsRef,
   assistantSegmentRef,
   params,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly offer: (event: AcpParsedSessionEvent) => Effect.Effect<void>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
@@ -626,7 +688,7 @@ const handleSessionUpdate = ({
     for (const event of parsed.events) {
       if (event._tag === "ToolCallUpdated") {
         yield* closeActiveAssistantSegment({
-          queue,
+          offer,
           assistantSegmentRef,
         });
         const { previous, merged } = yield* Ref.modify(toolCallsRef, (current) => {
@@ -643,7 +705,7 @@ const handleSessionUpdate = ({
         if (!shouldEmitToolCallUpdate(previous, merged)) {
           continue;
         }
-        yield* Queue.offer(queue, {
+        yield* offer({
           _tag: "ToolCallUpdated",
           toolCall: merged,
           rawPayload: event.rawPayload,
@@ -652,7 +714,7 @@ const handleSessionUpdate = ({
       }
       if (event._tag === "ContentDelta") {
         if (event.streamKind === "reasoning_text") {
-          yield* Queue.offer(queue, event);
+          yield* offer(event);
           continue;
         }
         if (event.text.trim().length === 0) {
@@ -662,18 +724,18 @@ const handleSessionUpdate = ({
           }
         }
         const itemId = yield* ensureActiveAssistantSegment({
-          queue,
+          offer,
           assistantSegmentRef,
           sessionId: params.sessionId,
           requestedItemId: event.itemId,
         });
-        yield* Queue.offer(queue, {
+        yield* offer({
           ...event,
           itemId,
         });
         continue;
       }
-      yield* Queue.offer(queue, event);
+      yield* offer(event);
     }
   });
 
@@ -713,12 +775,12 @@ const assistantItemId = (sessionId: string, segmentIndex: number) =>
   `assistant:${sessionId}:segment:${segmentIndex}`;
 
 const ensureActiveAssistantSegment = ({
-  queue,
+  offer,
   assistantSegmentRef,
   sessionId,
   requestedItemId,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly offer: (event: AcpParsedSessionEvent) => Effect.Effect<void>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
   readonly requestedItemId?: string | undefined;
@@ -761,10 +823,10 @@ const ensureActiveAssistantSegment = ({
     Effect.flatMap((result) =>
       Effect.gen(function* () {
         if (result.completedEvent) {
-          yield* Queue.offer(queue, result.completedEvent);
+          yield* offer(result.completedEvent);
         }
         if (result.startedEvent) {
-          yield* Queue.offer(queue, result.startedEvent);
+          yield* offer(result.startedEvent);
         }
         return result.itemId;
       }),
@@ -772,10 +834,10 @@ const ensureActiveAssistantSegment = ({
   );
 
 const closeActiveAssistantSegment = ({
-  queue,
+  offer,
   assistantSegmentRef,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly offer: (event: AcpParsedSessionEvent) => Effect.Effect<void>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
 }) =>
   Ref.modify(assistantSegmentRef, (current) => {
@@ -791,4 +853,4 @@ const closeActiveAssistantSegment = ({
         nextSegmentIndex: current.nextSegmentIndex,
       } satisfies AcpAssistantSegmentState,
     ] as const;
-  }).pipe(Effect.flatMap((event) => (event ? Queue.offer(queue, event) : Effect.void)));
+  }).pipe(Effect.flatMap((event) => (event ? offer(event) : Effect.void)));
