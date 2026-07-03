@@ -23,11 +23,13 @@
 ### Task 1: Mermaid rendering module
 
 **Files:**
+
 - Modify: `apps/web/package.json` (add `mermaid` dependency)
 - Create: `apps/web/src/lib/mermaidRendering.ts`
 - Test: `apps/web/src/lib/mermaidRendering.test.ts`
 
 **Interfaces:**
+
 - Consumes: `fnv1a32` from `./diffRendering`, `LRUCache` from `./lruCache` (existing; `LRUCache<T>(maxEntries, maxBytes)` with `.get(key): T | null` and `.set(key, value, sizeBytes)`).
 - Produces:
   - `type MermaidTheme = "default" | "dark"`
@@ -235,11 +237,13 @@ git commit -m "feat(web): add lazy mermaid rendering module with render cache"
 Extracts the existing `CodeHighlightErrorBoundary` (currently private in `ChatMarkdown.tsx`, lines 62–81) into a shared file so the new diagram component reuses it instead of duplicating a boundary. Behavior is unchanged; the existing `ChatMarkdown` tests are the regression check.
 
 **Files:**
+
 - Create: `apps/web/src/components/chat/CodeHighlightErrorBoundary.tsx`
 - Modify: `apps/web/src/components/ChatMarkdown.tsx` (remove the inline class, import the extracted one)
 - Test: `apps/web/src/components/ChatMarkdown.test.tsx` (existing — must still pass)
 
 **Interfaces:**
+
 - Produces: `CodeHighlightErrorBoundary` React component with props `{ fallback: ReactNode; children: ReactNode }`.
 
 - [ ] **Step 1: Create the shared component**
@@ -303,11 +307,13 @@ git commit -m "refactor(web): extract CodeHighlightErrorBoundary for reuse"
 ### Task 3: Mermaid diagram component
 
 **Files:**
+
 - Create: `apps/web/src/components/chat/MermaidDiagram.tsx`
 - Modify: `apps/web/src/index.css` (add `.chat-markdown-mermaid` sizing)
 - Test: `apps/web/src/components/chat/MermaidDiagram.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `getCachedMermaidSvg`, `createMermaidCacheKey`, `getMermaidSvgPromise`, `resolveMermaidTheme`, `type MermaidTheme` from `../../lib/mermaidRendering`; `CodeHighlightErrorBoundary` from `./CodeHighlightErrorBoundary`; `copyTextToClipboard` from `../../hooks/useCopyToClipboard`; `CheckIcon`, `CopyIcon`, `Maximize2` from `~/lib/icons`; `type ExpandedImagePreview` from `./ExpandedImagePreview`.
 - Produces: default export `MermaidDiagram` with props
   `{ code: string; resolvedTheme: "light" | "dark"; isStreaming: boolean; onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined; sourceFallback: ReactNode }`.
@@ -330,10 +336,7 @@ vi.mock("../../lib/mermaidRendering", () => ({
   getMermaidSvgPromise: getMermaidSvgPromiseMock,
 }));
 
-async function render(props: {
-  isStreaming: boolean;
-  cachedSvg: string | null;
-}) {
+async function render(props: { isStreaming: boolean; cachedSvg: string | null }) {
   getCachedMermaidSvgMock.mockReturnValue(props.cachedSvg);
   getMermaidSvgPromiseMock.mockReturnValue(new Promise<string>(() => {}));
   const { default: MermaidDiagram } = await import("./MermaidDiagram");
@@ -375,7 +378,7 @@ Expected: FAIL — module `./MermaidDiagram` does not exist.
 
 Create `apps/web/src/components/chat/MermaidDiagram.tsx`:
 
-```tsx
+````tsx
 // FILE: MermaidDiagram.tsx
 // Purpose: Render a ```mermaid fenced block inline — lazy-loaded, cache-first, render-on-complete,
 //          with an error/streaming fallback to the source block plus copy + expand affordances.
@@ -461,10 +464,7 @@ function MermaidFrame({
         </button>
       </div>
       {/* svg is produced by mermaid with securityLevel: "strict" (DOMPurify-sanitized). */}
-      <div
-        className="chat-markdown-mermaid__svg"
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
+      <div className="chat-markdown-mermaid__svg" dangerouslySetInnerHTML={{ __html: svg }} />
     </div>
   );
 }
@@ -508,7 +508,7 @@ export default function MermaidDiagram({
     </CodeHighlightErrorBoundary>
   );
 }
-```
+````
 
 - [ ] **Step 4: Add minimal styling**
 
@@ -554,10 +554,12 @@ git commit -m "feat(web): add inline MermaidDiagram component"
 ### Task 4: Route mermaid fences in ChatMarkdown
 
 **Files:**
+
 - Modify: `apps/web/src/components/ChatMarkdown.tsx` (the `pre` component override, lines 1028–1051)
 - Test: `apps/web/src/components/ChatMarkdown.test.tsx` (add cases)
 
 **Interfaces:**
+
 - Consumes: default `MermaidDiagram` from `./chat/MermaidDiagram`.
 - Produces: no new exports; ` ```mermaid ` fences now render via `MermaidDiagram`.
 
@@ -565,7 +567,7 @@ git commit -m "feat(web): add inline MermaidDiagram component"
 
 Add to `apps/web/src/components/ChatMarkdown.test.tsx` inside the `describe("ChatMarkdown", ...)` block:
 
-```tsx
+````tsx
 it("routes a mermaid fence to the diagram component", async () => {
   const markup = await renderMarkdown("```mermaid\ngraph TD;A-->B\n```");
   expect(markup).toContain("chat-markdown-mermaid");
@@ -576,7 +578,7 @@ it("still routes non-mermaid fences to the code block", async () => {
   expect(markup).not.toContain("chat-markdown-mermaid");
   expect(markup).toContain("chat-markdown-codeblock");
 });
-```
+````
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -653,10 +655,12 @@ git commit -m "feat(web): render mermaid fences as inline diagrams"
 ### Task 5: Shared capability constant + provider helper
 
 **Files:**
+
 - Create: `apps/server/src/provider/diagramCapability.ts`
 - Test: `apps/server/src/provider/diagramCapability.test.ts`
 
 **Interfaces:**
+
 - Consumes: `type ProviderKind` from `@t3tools/contracts`.
 - Produces:
   - `MERMAID_CAPABILITY_INSTRUCTION: string`
@@ -669,10 +673,7 @@ Create `apps/server/src/provider/diagramCapability.test.ts`:
 ```ts
 import { describe, expect, it } from "vitest";
 
-import {
-  MERMAID_CAPABILITY_INSTRUCTION,
-  diagramCapabilityPreambleFor,
-} from "./diagramCapability";
+import { MERMAID_CAPABILITY_INSTRUCTION, diagramCapabilityPreambleFor } from "./diagramCapability";
 
 describe("diagramCapability", () => {
   it("instruction mentions the mermaid fence", () => {
@@ -704,7 +705,7 @@ Expected: FAIL — module `./diagramCapability` does not exist.
 
 Create `apps/server/src/provider/diagramCapability.ts`:
 
-```ts
+````ts
 // FILE: diagramCapability.ts
 // Purpose: Single source-of-truth instruction telling a provider's model it can draft
 //          renderable Mermaid diagrams, plus the rule for which providers get it via a
@@ -726,10 +727,7 @@ export const MERMAID_CAPABILITY_INSTRUCTION =
 // gemini, grok, kilo, opencode, pi) has no such channel and gets a first-turn preamble.
 const PROVIDERS_WITH_SYSTEM_INSTRUCTION_CHANNEL = new Set<ProviderKind>(["codex", "claudeAgent"]);
 
-export function diagramCapabilityPreambleFor(
-  provider: ProviderKind,
-  isFirstTurn: boolean,
-): string {
+export function diagramCapabilityPreambleFor(provider: ProviderKind, isFirstTurn: boolean): string {
   if (!isFirstTurn) {
     return "";
   }
@@ -738,7 +736,7 @@ export function diagramCapabilityPreambleFor(
   }
   return MERMAID_CAPABILITY_INSTRUCTION;
 }
-```
+````
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -757,11 +755,13 @@ git commit -m "feat(server): add shared mermaid capability instruction + provide
 ### Task 6: Advertise to Codex and Claude via their system channels
 
 **Files:**
+
 - Modify: `apps/server/src/codexAppServerManager.ts` (append to both developer-instruction constants, lines 328–461)
 - Modify: `apps/server/src/provider/Layers/ClaudeAdapter.ts` (add to and export the system-prompt append, lines 805–810)
 - Test: `apps/server/src/provider/diagramCapability.wiring.test.ts`
 
 **Interfaces:**
+
 - Consumes: `MERMAID_CAPABILITY_INSTRUCTION` from `./provider/diagramCapability` (Codex) and `../diagramCapability` (Claude).
 - Produces: `EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND` becomes an exported constant from `ClaudeAdapter.ts`.
 
@@ -815,7 +815,9 @@ Then append it to both constants. Change the tail of `CODEX_PLAN_MODE_DEVELOPER_
 ```ts
 </collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}`;
 ```
+
 to:
+
 ```ts
 </collaboration_mode>${CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS}${CODEX_DIAGRAM_INSTRUCTIONS}`;
 ```
@@ -865,9 +867,11 @@ git commit -m "feat(server): advertise mermaid capability to codex and claude"
 Wires the pure helper (already unit-tested in Task 5) into the orchestration turn builder for the six providers that have no system channel, gated to the first turn of a thread via the existing `activeSessionBeforeEnsure === undefined` signal (no new state).
 
 **Files:**
+
 - Modify: `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` (import + fold into the composed input near lines 903–933)
 
 **Interfaces:**
+
 - Consumes: `diagramCapabilityPreambleFor` from `../../provider/diagramCapability`; existing in-scope `selectedProvider`, `activeSessionBeforeEnsure`, `providerInputWithSkills`.
 - Produces: no new exports.
 
@@ -884,28 +888,28 @@ import { diagramCapabilityPreambleFor } from "../../provider/diagramCapability";
 Immediately after the `providerInputWithSkills` assignment (currently lines 924–926), insert:
 
 ```ts
-    // Providers without a system-prompt channel are told once, on the first turn of
-    // the thread, that they can draft renderable mermaid diagrams. Codex/Claude get
-    // this via their system channels instead, so the helper returns "" for them.
-    const diagramCapabilityText = diagramCapabilityPreambleFor(
-      selectedProvider as ProviderKind,
-      activeSessionBeforeEnsure === undefined,
-    );
-    const providerInputWithCapability = diagramCapabilityText
-      ? `${providerInputWithSkills}\n\n${diagramCapabilityText}`
-      : providerInputWithSkills;
+// Providers without a system-prompt channel are told once, on the first turn of
+// the thread, that they can draft renderable mermaid diagrams. Codex/Claude get
+// this via their system channels instead, so the helper returns "" for them.
+const diagramCapabilityText = diagramCapabilityPreambleFor(
+  selectedProvider as ProviderKind,
+  activeSessionBeforeEnsure === undefined,
+);
+const providerInputWithCapability = diagramCapabilityText
+  ? `${providerInputWithSkills}\n\n${diagramCapabilityText}`
+  : providerInputWithSkills;
 ```
 
 Then change the `normalizeSkillMentionTextForProvider` call (currently line 930) to consume the new variable:
 
 ```ts
-    const normalizedInput = toNonEmptyProviderInput(
-      normalizeSkillMentionTextForProvider({
-        provider: selectedProvider as ProviderKind,
-        messageText: providerInputWithCapability,
-        ...(input.skills !== undefined ? { skills: input.skills } : {}),
-      }),
-    );
+const normalizedInput = toNonEmptyProviderInput(
+  normalizeSkillMentionTextForProvider({
+    provider: selectedProvider as ProviderKind,
+    messageText: providerInputWithCapability,
+    ...(input.skills !== undefined ? { skills: input.skills } : {}),
+  }),
+);
 ```
 
 - [ ] **Step 3: Verify the build and full check pass**
@@ -953,6 +957,7 @@ git commit -m "chore: formatting for mermaid diagram feature" || echo "nothing t
 ## Self-Review
 
 **Spec coverage:**
+
 - Layer 2 renderer (lazy-load, cache, render-on-complete, error fallback, theme) → Tasks 1–4.
 - Inline UX with copy + expand → Task 3 (`MermaidFrame`).
 - Security (`securityLevel: "strict"`, `htmlLabels: false`) → Task 1 (`getMermaidModulePromise`).
@@ -963,6 +968,7 @@ git commit -m "chore: formatting for mermaid diagram feature" || echo "nothing t
 - Testing + `bun fmt`/`lint`/`typecheck` gate → Tasks 1–8.
 
 **Resolved open questions from the spec:**
+
 - Per-thread "advertised" flag home → reuses existing `activeSessionBeforeEnsure === undefined`; no new state.
 - Expand overlay reuse → `MermaidFrame` serializes the SVG to a `data:image/svg+xml` URL and reuses the existing `ExpandedImagePreview` / `onImageExpand` contract, no image-specific variant needed.
 - Mermaid theme mapping → `resolveMermaidTheme` maps light→`default`, dark→`dark`, applied per-diagram via an `%%{init}%%` directive.

@@ -30,10 +30,12 @@ The desktop renderer runs at origin `t3://app`, already trusted by `isTrustedApp
 ### Task A1: Reusable app-CORS header helper
 
 **Files:**
+
 - Create: `apps/server/src/appCors.ts`
 - Test: `apps/server/src/appCors.test.ts`
 
 **Interfaces:**
+
 - Consumes: `isTrustedAppOrigin`, `normalizeCorsOrigin` from `./trustedOrigins`; `ServerConfigShape` from `./config`.
 - Produces:
   - `appCorsHeaders(input: { rawOrigin: string | ReadonlyArray<string> | undefined; requestOrigin: string; config: ServerConfigShape }): Record<string, string>` — returns `{}` when the origin is not trusted, otherwise the ACAO/Vary/ACAM/ACAH set.
@@ -73,9 +75,9 @@ describe("appCorsHeaders", () => {
   });
 
   it("returns no headers when no Origin is present", () => {
-    expect(
-      appCorsHeaders({ rawOrigin: undefined, requestOrigin: "https://x", config }),
-    ).toEqual({});
+    expect(appCorsHeaders({ rawOrigin: undefined, requestOrigin: "https://x", config })).toEqual(
+      {},
+    );
   });
 });
 ```
@@ -138,10 +140,12 @@ git commit -m "feat(server): add app-CORS header helper for trusted origins"
 ### Task A2: Apply CORS + OPTIONS preflight to `/api/auth/*`
 
 **Files:**
+
 - Modify: `apps/server/src/http.ts` (the `authEffectRouteLayer`, ~line 209–374; imports ~line 34)
 - Test: `apps/server/src/http.test.ts` (existing — add cases)
 
 **Interfaces:**
+
 - Consumes: `appCorsHeaders` (Task A1).
 - Produces: every `/api/auth/*` response carries CORS headers for trusted cross-origins; an `OPTIONS /api/auth/*` returns `204` with CORS headers.
 
@@ -204,7 +208,7 @@ Then ensure each JSON/text response in this route includes `cors`. The route bui
 // At each `return HttpServerResponse.jsonUnsafe(...)`/`respondJson` return point in this
 // layer, pipe through: .pipe(HttpServerResponse.setHeaders(cors))
 // e.g.:
-return HttpServerResponse.jsonUnsafe(yield* serverAuth.getSessionState(authRequest)).pipe(
+return HttpServerResponse.jsonUnsafe(yield * serverAuth.getSessionState(authRequest)).pipe(
   HttpServerResponse.setHeaders(cors),
 );
 ```
@@ -232,12 +236,14 @@ Wire the latent `issueStartupPairingUrl` so an always-on headless host can surfa
 ### Task B1: Print pairing URL + terminal QR at startup when remote-reachable
 
 **Files:**
+
 - Modify: `apps/server/src/main.ts` (the `makeServerProgram` startup path)
 - Create: `apps/server/src/startupPairingBanner.ts`
 - Test: `apps/server/src/startupPairingBanner.test.ts`
 - Modify: `apps/web/package.json` is NOT involved here; add `qrcode` to `apps/server/package.json` dependencies.
 
 **Interfaces:**
+
 - Consumes: `ServerAuth.issueStartupPairingUrl(baseUrl)`; `qrcode` (`QRCode.toString`).
 - Produces: `formatStartupPairingBanner(input: { pairingUrl: string; qr: string }): string` — pure string formatter; and a startup side-effect that logs it.
 
@@ -318,12 +324,12 @@ In `apps/server/src/main.ts`, inside `makeServerProgram`, after the server is li
 
 ```typescript
 // After the HTTP server is listening:
-const descriptor = yield* serverAuth.getDescriptor();
+const descriptor = yield * serverAuth.getDescriptor();
 if (descriptor.policy === "remote-reachable") {
   const baseUrl = resolvePublicBaseUrl(config); // existing host+port -> URL helper; if none, build `http(s)://${host}:${port}`
-  const pairingUrl = yield* serverAuth.issueStartupPairingUrl(baseUrl);
-  const qr = yield* Effect.promise(() => renderPairingQr(pairingUrl));
-  yield* Effect.logInfo(formatStartupPairingBanner({ pairingUrl, qr }));
+  const pairingUrl = yield * serverAuth.issueStartupPairingUrl(baseUrl);
+  const qr = yield * Effect.promise(() => renderPairingQr(pairingUrl));
+  yield * Effect.logInfo(formatStartupPairingBanner({ pairingUrl, qr }));
 }
 ```
 
@@ -350,11 +356,13 @@ git commit -m "feat(server): print pairing link + QR at startup when remote-reac
 ### Task B2: Owner-only `/api/auth/pairing-url` endpoint (ready-made client link)
 
 **Files:**
+
 - Modify: `apps/server/src/auth/http.ts` (add a route near the existing `/api/auth/pairing-token`, ~line 268)
 - Modify: `apps/server/src/auth/Services/ServerAuth.ts` (add method to shape) and `apps/server/src/auth/Layers/ServerAuth.ts` (implement)
 - Test: `apps/server/src/auth/Layers/ServerAuth.test.ts` (existing — add case)
 
 **Interfaces:**
+
 - Produces: `ServerAuth.issueClientPairingUrl(baseUrl: string, input?: AuthCreatePairingCredentialInput): Effect<string, AuthError>` — like `issueStartupPairingUrl` but role `client`; and `POST /api/auth/pairing-url` (owner-authed) returning `{ url: string; expiresAt: string }`.
 
 - [ ] **Step 1: Write the failing test** — add to `apps/server/src/auth/Layers/ServerAuth.test.ts`
@@ -408,15 +416,19 @@ Add `issueClientPairingUrl` to the returned object (next to `issueStartupPairing
 
 ```typescript
 if (method === "POST" && input.url.pathname === "/api/auth/pairing-url") {
-  const session = yield* input.serverAuth.authenticateHttpRequest(authRequest);
+  const session = yield * input.serverAuth.authenticateHttpRequest(authRequest);
   if (session.role !== "owner") {
-    return yield* new AuthError({
-      message: "Only owner sessions can create pairing links.",
-      status: 403,
-    });
+    return (
+      yield *
+      new AuthError({
+        message: "Only owner sessions can create pairing links.",
+        status: 403,
+      })
+    );
   }
   const payload = hasRequestBody(headers)
-    ? yield* readJsonBody(input.req, "Invalid pairing url payload.").pipe(
+    ? yield *
+      readJsonBody(input.req, "Invalid pairing url payload.").pipe(
         Effect.flatMap((body) =>
           decodeCreatePairingCredentialInput(body).pipe(
             Effect.mapError(
@@ -428,7 +440,7 @@ if (method === "POST" && input.url.pathname === "/api/auth/pairing-url") {
       )
     : {};
   const baseUrl = `${input.url.protocol}//${input.url.host}`;
-  const url = yield* input.serverAuth.issueClientPairingUrl(baseUrl, payload);
+  const url = yield * input.serverAuth.issueClientPairingUrl(baseUrl, payload);
   respondJson(input.respond, 200, { url });
   return;
 }
@@ -455,10 +467,12 @@ git commit -m "feat(server): add owner-only pairing-url endpoint for client link
 ### Task C1: `Host` type + host store (Zustand, persisted)
 
 **Files:**
+
 - Create: `apps/web/src/hosts/hostStore.ts`
 - Test: `apps/web/src/hosts/hostStore.test.ts`
 
 **Interfaces:**
+
 - Produces:
   ```typescript
   export type HostKind = "local" | "remote";
@@ -602,9 +616,7 @@ export const useHostStore = create<HostStoreState>()(
       activeHostId: LOCAL_HOST_ID,
       addRemoteHost: ({ label, baseUrl }) => {
         const normalized = normalizeBaseUrl(baseUrl);
-        const existing = get().hosts.find(
-          (h) => h.kind === "remote" && h.baseUrl === normalized,
-        );
+        const existing = get().hosts.find((h) => h.kind === "remote" && h.baseUrl === normalized);
         if (existing) {
           set((s) => ({
             hosts: s.hosts.map((h) =>
@@ -687,12 +699,15 @@ git commit -m "feat(web): add persisted host store with pinned local host"
 ### Task C2: Credential store abstraction (keychain or localStorage)
 
 **Files:**
+
 - Create: `apps/web/src/hosts/hostCredentialStore.ts`
 - Test: `apps/web/src/hosts/hostCredentialStore.test.ts`
 
 **Interfaces:**
+
 - Consumes: `window.desktopBridge?.secureCredentialStore` (added in Phase F) when present; falls back to `localStorage`.
 - Produces:
+
   ```typescript
   export interface HostCredentialStore {
     get(hostId: string): Promise<string | null>;
@@ -796,10 +811,12 @@ git commit -m "feat(web): add per-host credential store abstraction"
 ### Task C3: `HostConnection` — host-aware auth fetch + ws-token URL
 
 **Files:**
+
 - Create: `apps/web/src/hosts/hostConnection.ts`
 - Test: `apps/web/src/hosts/hostConnection.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Host` (C1), `HostCredentialStore` (C2).
 - Produces:
   ```typescript
@@ -807,11 +824,17 @@ git commit -m "feat(web): add per-host credential store abstraction"
     readonly host: Host;
     // Absolute or relative path -> response JSON. Local: relative + same-origin cookie.
     // Remote: absolute baseUrl + Authorization: Bearer.
-    requestAuthJson<T>(path: string, options?: { method?: "GET" | "POST"; body?: unknown }): Promise<T>;
+    requestAuthJson<T>(
+      path: string,
+      options?: { method?: "GET" | "POST"; body?: unknown },
+    ): Promise<T>;
     // Resolves the /ws socket URL, fetching+appending a fresh wsToken for remote.
     resolveSocketUrl(): Promise<string>;
   }
-  export function makeHostConnection(host: Host, deps?: { credentials?: HostCredentialStore }): HostConnection;
+  export function makeHostConnection(
+    host: Host,
+    deps?: { credentials?: HostCredentialStore },
+  ): HostConnection;
   ```
 - `resolveSocketUrl()` for **local** returns the existing behavior (`window.desktopBridge?.getWsUrl()` → `/ws`); for **remote** it fetches `POST {baseUrl}/api/auth/ws-token` (bearer) and returns `wss?://host/ws?wsToken=<token>`.
 
@@ -972,7 +995,10 @@ export function makeHostConnection(
     const payload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
       const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+        payload &&
+        typeof payload === "object" &&
+        "error" in payload &&
+        typeof payload.error === "string"
           ? payload.error
           : `Auth request failed with status ${response.status}`;
       throw new Error(message);
@@ -1009,10 +1035,12 @@ git commit -m "feat(web): add host-aware connection (bearer + ws-token) abstract
 ### Task C4: Transport accepts an async socket-URL resolver (fresh token per session)
 
 **Files:**
+
 - Modify: `apps/web/src/wsTransport.ts` (constructor ~134; `createSession` ~263; `dispose` ~244; `reconnect` ~293; `openReconnectSession` ~329)
 - Test: `apps/web/src/wsTransport.test.ts` (existing — add a case)
 
 **Interfaces:**
+
 - Produces: `new WsTransport(url?: string | (() => Promise<string>))`. Accepts BOTH the legacy string form (back-compat with existing tests/callers) and an async resolver. When omitted, behavior is identical to today (uses `makeSocketUrl(null)`). Each session (initial + every reconnect) calls the resolver so a fresh `wsToken` is fetched on reconnect.
 - Consumes: nothing new at call sites that don't pass a resolver.
 
@@ -1204,12 +1232,14 @@ git commit -m "refactor(web): transport resolves socket URL asynchronously per s
 ### Task C5: Host-aware native API + active-host wiring
 
 **Files:**
+
 - Modify: `apps/web/src/wsNativeApi.ts` (`requestAuthJson` ~104; `createWsNativeApi` ~315; `resetWsNativeApiForTest` ~910)
 - Modify: `apps/web/src/nativeApi.ts` (full file)
 - Create: `apps/web/src/hosts/activeHostConnection.ts`
 - Test: `apps/web/src/wsNativeApi.test.ts` (existing — add a case)
 
 **Interfaces:**
+
 - Consumes: `makeHostConnection` (C3), `useHostStore` (C1), `isElectron`.
 - Produces:
   - `apps/web/src/hosts/activeHostConnection.ts`: `getActiveHostConnection(): HostConnection` — builds a `HostConnection` for the current `useHostStore.getState().getActiveHost()` (forces Local when not electron).
@@ -1248,7 +1278,14 @@ it("routes auth requests through the active host connection", async () => {
   // Build a fake connection that records calls.
   const calls: string[] = [];
   const connection = {
-    host: { id: "host_x", kind: "remote", baseUrl: "https://x", label: "X", createdAt: 0, lastConnectedAt: null },
+    host: {
+      id: "host_x",
+      kind: "remote",
+      baseUrl: "https://x",
+      label: "X",
+      createdAt: 0,
+      lastConnectedAt: null,
+    },
     requestAuthJson: async <T>(path: string) => {
       calls.push(path);
       return { authenticated: true } as unknown as T;
@@ -1272,6 +1309,7 @@ Expected: FAIL — `createWsNativeApi` takes no argument / `requestAuthJson` is 
 In `apps/web/src/wsNativeApi.ts`:
 
 1. Add import:
+
 ```typescript
 import { getActiveHostConnection } from "./hosts/activeHostConnection";
 import type { HostConnection } from "./hosts/hostConnection";
@@ -1343,10 +1381,12 @@ git commit -m "feat(web): route native API auth + socket through the active host
 ### Task D1: Store-reset registry
 
 **Files:**
+
 - Create: `apps/web/src/hosts/hostScopedStores.ts`
 - Test: `apps/web/src/hosts/hostScopedStores.test.ts`
 
 **Interfaces:**
+
 - Produces:
   - `registerHostScopedReset(reset: () => void): void` — stores register their reset fn.
   - `resetAllHostScopedStores(): void` — invokes all registered resets.
@@ -1419,6 +1459,7 @@ registerHostScopedReset(() => useStore.setState(initialState, true));
 ```
 
 Repeat for the other host-scoped stores (each near its `create(...)`):
+
 - `apps/web/src/workspaceStore.ts` → `registerHostScopedReset(() => useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true))`
 - `apps/web/src/terminalStateStore.ts`, `apps/web/src/projectRunStore.ts`, `apps/web/src/threadSelectionStore.ts`, `apps/web/src/splitViewStore.ts`, `apps/web/src/temporaryThreadStore.ts` → same pattern with their own hooks.
 
@@ -1434,10 +1475,12 @@ git commit -m "feat(web): add host-scoped store reset registry"
 ### Task D2: `switchActiveHost` orchestration
 
 **Files:**
+
 - Create: `apps/web/src/hosts/switchActiveHost.ts`
 - Test: `apps/web/src/hosts/switchActiveHost.test.ts`
 
 **Interfaces:**
+
 - Consumes: `useHostStore` (C1), `resetWsNativeApiForTest`-style dispose (reuse the singleton dispose path), `resetAllHostScopedStores` (D1).
 - Produces: `switchActiveHost(hostId: string): void` — sets active host, disposes the current native API/transport, resets host-scoped stores, then reloads the app shell so the next `readNativeApi()` builds the new connection.
 
@@ -1493,10 +1536,7 @@ Expected: FAIL — module not found.
 import { resetAllHostScopedStores } from "./hostScopedStores";
 import { useHostStore } from "./hostStore";
 
-export function switchActiveHost(
-  hostId: string,
-  deps?: { reload?: () => void },
-): void {
+export function switchActiveHost(hostId: string, deps?: { reload?: () => void }): void {
   const state = useHostStore.getState();
   if (state.activeHostId === hostId) return;
   if (!state.hosts.some((h) => h.id === hostId)) return;
@@ -1526,10 +1566,12 @@ git commit -m "feat(web): add rebuild-on-switch host switching"
 ### Task E1: Pairing link parse + redeem logic
 
 **Files:**
+
 - Create: `apps/web/src/hosts/pairing.ts`
 - Test: `apps/web/src/hosts/pairing.test.ts`
 
 **Interfaces:**
+
 - Consumes: `getHostCredentialStore` (C2), `useHostStore` (C1).
 - Produces:
   - `parsePairingLink(link: string): { baseUrl: string; credential: string } | null` — accepts a full `https://host/pair#token=…` link (also tolerates `?token=` and a bare token only if a `baseUrl` is supplied separately → return null for bare).
@@ -1642,9 +1684,10 @@ export async function redeemPairingLink(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ credential: parsed.credential }),
   });
-  const payload = (await response.json().catch(() => null)) as
-    | { sessionToken?: string; error?: string }
-    | null;
+  const payload = (await response.json().catch(() => null)) as {
+    sessionToken?: string;
+    error?: string;
+  } | null;
   if (!response.ok || !payload?.sessionToken) {
     throw new Error(payload?.error ?? "Pairing failed. The link may have expired.");
   }
@@ -1672,12 +1715,14 @@ git commit -m "feat(web): add pairing link parse + redeem"
 ### Task E2: Public `/pair` route (phone same-origin redeem)
 
 **Files:**
+
 - Create: `apps/web/src/routes/pair.tsx`
 - Modify: `apps/web/src/routeTree.gen.ts` (regenerated by codegen — do not hand-edit)
 - Test: `apps/web/src/routes/pair.logic.test.ts` (pure logic extracted)
 - Create: `apps/web/src/routes/pairRedeem.ts` (testable redeem-on-mount logic)
 
 **Interfaces:**
+
 - The `/pair` route is a **root-level public route** (sibling of `_chat`), so it renders without the auth/bootstrap gate.
 - Produces: `pairRedeemFromLocation(href: string, deps): Promise<{ ok: true; hostId: string } | { ok: false; message: string }>`.
 
@@ -1827,11 +1872,13 @@ git commit -m "feat(web): add public /pair route to redeem pairing links"
 ### Task E3: Add-host dialog (paste link, all clients)
 
 **Files:**
+
 - Create: `apps/web/src/components/hosts/AddHostDialog.tsx`
 - Test: `apps/web/src/components/hosts/addHostDialog.logic.test.ts`
 - Create: `apps/web/src/components/hosts/addHostDialogLogic.ts`
 
 **Interfaces:**
+
 - Consumes: `redeemPairingLink` (E1), `parsePairingLink` (E1).
 - Produces: `validateAddHostInput(link: string): { valid: boolean; reason?: string }` + the dialog component (paste field → redeem → close).
 
@@ -1990,10 +2037,12 @@ git commit -m "feat(web): add paste-link Add-host dialog"
 ### Task F1: `safeStorage`-backed credential logic
 
 **Files:**
+
 - Create: `apps/desktop/src/secureCredentialStore.ts`
 - Test: `apps/desktop/src/secureCredentialStore.test.ts`
 
 **Interfaces:**
+
 - Produces: `makeSecureCredentialStore(deps: { encrypt; decrypt; isEncryptionAvailable; readFile; writeFile; filePath })` returning `{ get(key); set(key, value); delete(key) }`. Pure-ish, dependency-injected so it's testable without Electron.
 
 - [ ] **Step 1: Write the failing test**
@@ -2123,11 +2172,13 @@ git commit -m "feat(desktop): add safeStorage-backed credential store logic"
 ### Task F2: Wire IPC channels + preload + DesktopBridge type
 
 **Files:**
+
 - Modify: `packages/contracts/src/ipc.ts` (DesktopBridge interface ~328–396)
 - Modify: `apps/desktop/src/main.ts` (add channels + `ipcMain.handle`; near the other handlers ~2208–2244)
 - Modify: `apps/desktop/src/preload.ts` (expose in `desktopBridge` ~43–172)
 
 **Interfaces:**
+
 - Produces: `window.desktopBridge.secureCredentialStore = { get(key): Promise<string|null>; set(key, value): Promise<void>; delete(key): Promise<void> }`.
 
 - [ ] **Step 1: Add the type** — in `packages/contracts/src/ipc.ts`, inside `interface DesktopBridge`:
@@ -2218,11 +2269,13 @@ git commit -m "feat(desktop): expose secure credential store over IPC"
 ### Task G1: Connection-status hook
 
 **Files:**
+
 - Create: `apps/web/src/hosts/useHostConnectionStatus.ts`
 - Test: `apps/web/src/hosts/hostConnectionStatus.logic.test.ts`
 - Create: `apps/web/src/hosts/hostConnectionStatus.ts` (pure mapping)
 
 **Interfaces:**
+
 - Consumes: `WsTransportState` (from `wsTransportEvents`), the existing `onWsTransportState` emitter in `wsNativeApi.ts`.
 - Produces: `mapTransportStateToHostStatus(state: WsTransportState): "connected" | "connecting" | "unreachable"`, and a `useHostConnectionStatus()` hook returning the current status.
 
@@ -2315,10 +2368,12 @@ git commit -m "feat(web): add host connection status hook"
 ### Task G2: Host switcher in the sidebar header
 
 **Files:**
+
 - Create: `apps/web/src/components/hosts/HostSwitcher.tsx`
 - Modify: `apps/web/src/components/Sidebar.tsx` (header region ~6166–6180)
 
 **Interfaces:**
+
 - Consumes: `useHostStore` (C1), `switchActiveHost` (D2), `useHostConnectionStatus` (G1), `AddHostDialog` (E3), Base UI `Menu`.
 - Produces: `HostSwitcher` component rendered in the sidebar header. On non-electron, it still renders (showing remote hosts only). Selecting a host calls `switchActiveHost`; "Add host…" opens `AddHostDialog`; "Manage devices…" navigates to `/settings` devices section.
 
@@ -2373,7 +2428,11 @@ export function HostSwitcher() {
           ))}
           <MenuSeparator />
           <MenuItem onClick={() => setAddOpen(true)}>Add host…</MenuItem>
-          <MenuItem onClick={() => void navigate({ to: "/settings", search: { section: "devices" } as never })}>
+          <MenuItem
+            onClick={() =>
+              void navigate({ to: "/settings", search: { section: "devices" } as never })
+            }
+          >
             Manage devices…
           </MenuItem>
         </MenuPopup>
@@ -2411,12 +2470,14 @@ git commit -m "feat(web): add host switcher to sidebar header"
 ### Task G3: Devices settings panel (generate link + QR + paired clients)
 
 **Files:**
+
 - Modify: `apps/web/src/settingsNavigation.ts` (add `devices` section + nav item)
 - Modify: `apps/web/src/routes/_chat.settings.tsx` (render the panel for `devices`)
 - Create: `apps/web/src/components/hosts/DevicesSettingsPanel.tsx`
 - Add dependency: `qrcode` to `apps/web/package.json`.
 
 **Interfaces:**
+
 - Consumes: `ensureNativeApi().server.listAuthClients()`, `.revokeAuthClient()`, and the new `pairing-url` endpoint via a new `server.createAuthPairingUrl()` native method (add it mirroring `createAuthPairingToken`). `qrcode` (`QRCode.toDataURL`).
 - Produces: a Devices panel that (a) generates a client pairing link + QR for the active host, (b) lists paired clients with revoke.
 
@@ -2512,7 +2573,11 @@ export function DevicesSettingsPanel() {
         {link ? (
           <div className="mt-3 space-y-2">
             {qr ? <img alt="Pairing QR code" src={qr} className="size-44" /> : null}
-            <input readOnly className="w-full rounded border bg-transparent px-2 py-1.5 text-xs" value={link} />
+            <input
+              readOnly
+              className="w-full rounded border bg-transparent px-2 py-1.5 text-xs"
+              value={link}
+            />
             <Button variant="ghost" onClick={() => void navigator.clipboard.writeText(link)}>
               Copy link
             </Button>
@@ -2556,10 +2621,12 @@ git commit -m "feat(web): add devices settings panel for pairing + device manage
 ### Task G4: Unreachable-host banner
 
 **Files:**
+
 - Create: `apps/web/src/components/hosts/HostConnectionBanner.tsx`
 - Modify: `apps/web/src/routes/__root.tsx` (render banner near the app shell root)
 
 **Interfaces:**
+
 - Consumes: `useHostConnectionStatus` (G1), `useHostStore`, `switchActiveHost`, `LOCAL_HOST_ID`, `isElectron`.
 - Produces: a non-blocking banner shown only when status is `unreachable`, offering "Retry" (reload) and, on desktop, "Switch to Local."
 
@@ -2619,11 +2686,13 @@ git commit -m "feat(web): add unreachable-host banner"
 ### Task H1: Detect a revoked bearer and flag the host for re-pair
 
 **Files:**
+
 - Modify: `apps/web/src/hosts/hostConnection.ts` (surface 401s distinctly)
 - Modify: `apps/web/src/hosts/hostStore.ts` (add a `needsRepair` flag + setter)
 - Test: `apps/web/src/hosts/hostConnection.test.ts` (add case)
 
 **Interfaces:**
+
 - Produces: `RevokedHostCredentialError` thrown by `requestAuthJson` on `401`; `useHostStore` gains `markNeedsRepair(hostId, value: boolean)` and `Host.needsRepair?: boolean`.
 
 - [ ] **Step 1: Write the failing test** — add to `apps/web/src/hosts/hostConnection.test.ts`
@@ -2681,6 +2750,7 @@ git commit -m "feat(web): flag hosts whose credential was revoked"
 ### Task H2: Update REMOTE.md for multi-host
 
 **Files:**
+
 - Modify: `REMOTE.md`
 
 - [ ] **Step 1: Rewrite the doc** to describe: (1) running an always-on host (Mac Studio) bound to a Tailnet IP/MagicDNS name, which now prints a pairing link + QR at startup; (2) pairing the desktop app via "Add host → paste link"; (3) pairing the phone by opening the `/pair` link or pasting it; (4) switching the active host; (5) managing/revoking devices in Settings → Devices. Keep the existing CLI flag table.
@@ -2719,6 +2789,6 @@ Expected: all pass. Fix any failures before finishing.
 ## Notes & caveats (carry into execution)
 
 - **TLS / mixed content:** A phone loading the app over `https://` from the host connects via `wss://` (same origin) — fine. The desktop at `t3://app` (privileged scheme) connects out to `http://`/`ws://` tailnet hosts; if Electron blocks that as mixed/insecure, prefer MagicDNS `https`/`wss` (Tailscale certs) or register the remote as a trusted bypass. Validate during H3 smoke; if blocked, add a small allowance in the desktop's `webPreferences`/CSP rather than weakening the server.
-- **Dev mode origin:** in `VITE_DEV_SERVER_URL` mode the desktop renderer origin is the Vite URL, not `t3://app`; cross-origin to a *remote* host won't match that host's `devUrl`. This only affects local development against a remote host; production (`t3://app`) is fine. Don't spend effort here unless it blocks dev.
+- **Dev mode origin:** in `VITE_DEV_SERVER_URL` mode the desktop renderer origin is the Vite URL, not `t3://app`; cross-origin to a _remote_ host won't match that host's `devUrl`. This only affects local development against a remote host; production (`t3://app`) is fine. Don't spend effort here unless it blocks dev.
 - **Owner vs client role:** the startup link grants **owner**; the Devices "Generate pairing link" grants **client**. Only owner devices can open the Devices panel's generate/revoke actions (server enforces 403). Surface that gracefully (hide/disable generate when the active session role isn't owner — read role from `getAuthSession()`).
 - **Phone first-add bootstrap:** the very first phone connection is the `/pair` link from the host's startup banner or the desktop's Devices panel; there is no discovery on the phone (by design).

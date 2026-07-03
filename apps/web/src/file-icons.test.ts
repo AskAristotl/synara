@@ -1,6 +1,11 @@
 import { assert, describe, it } from "vitest";
 
-import { getAttachmentIconName, getFileIconName, inferEntryKindFromPath } from "./file-icons";
+import {
+  getAttachmentIconName,
+  getFileIconName,
+  inferEntryKindFromPath,
+  pathLooksLikeKnownFile,
+} from "./file-icons";
 
 describe("getFileIconName", () => {
   it("uses exact filename matches from the Central mapping", () => {
@@ -51,6 +56,16 @@ describe("getFileIconName", () => {
     assert.equal(getFileIconName("Main.PY"), "phyton");
   });
 
+  it("never resolves Object.prototype members for prototype-key basenames", () => {
+    // "constructor"/"__proto__" as chat tokens must not hit inherited object
+    // members — that returned a function as the icon name and crashed the app.
+    assert.equal(getFileIconName("constructor"), "code-brackets");
+    assert.equal(getFileIconName("__proto__"), "code-brackets");
+    assert.equal(getFileIconName("foo.constructor"), "code-brackets");
+    assert.equal(pathLooksLikeKnownFile("constructor"), false);
+    assert.equal(pathLooksLikeKnownFile("__proto__"), false);
+  });
+
   it("treats known extensionless basenames as files", () => {
     assert.equal(inferEntryKindFromPath("LICENSE"), "file");
     assert.equal(inferEntryKindFromPath("C:\\repo\\.gitignore"), "file");
@@ -83,6 +98,14 @@ describe("getAttachmentIconName", () => {
     assert.equal(getAttachmentIconName({ name: "clip", mimeType: "audio/x-wav" }), "audio");
     assert.equal(getAttachmentIconName({ name: "movie", mimeType: "video/quicktime" }), "video");
     assert.equal(getAttachmentIconName({ name: "notes", mimeType: "text/plain" }), "file-text");
+  });
+
+  it("never resolves Object.prototype members for prototype-key names or MIME types", () => {
+    assert.equal(
+      getAttachmentIconName({ name: "constructor", mimeType: "constructor" }),
+      "file-text",
+    );
+    assert.equal(getAttachmentIconName({ name: "__proto__", mimeType: null }), "file-text");
   });
 
   it("defaults to a document glyph rather than the source-code bracket", () => {

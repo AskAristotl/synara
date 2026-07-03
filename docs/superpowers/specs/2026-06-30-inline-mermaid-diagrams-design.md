@@ -7,24 +7,24 @@
 ## Summary
 
 Render Mermaid diagrams inline in the conversation, and reliably get the agent
-to *produce* them — the way Traycer and the Claude desktop app do. Today Synara's
+to _produce_ them — the way Traycer and the Claude desktop app do. Today Synara's
 markdown renderer (`ChatMarkdown.tsx`) supports math (KaTeX), GFM tables/task
-lists, Shiki-highlighted code, and images, but a ```` ```mermaid ```` block is
+lists, Shiki-highlighted code, and images, but a ` ```mermaid ` block is
 shown only as a highlighted code block, never a rendered diagram. And nothing
 tells the agent that diagrams render, so it won't reach for one proactively.
 
 "Solid" means two independent layers must both hold:
 
 - **Layer 1 — Advertisement:** the model only reliably drafts renderable
-  diagrams if it is *told* the capability exists (this is exactly how
+  diagrams if it is _told_ the capability exists (this is exactly how
   claude.ai Artifacts and Traycer do it — an explicit system-prompt
   instruction). Synara is multi-provider, so this must be wired per provider.
 - **Layer 2 — Rendering:** whatever the model emits must render robustly and
-  must *never* break the conversation (invalid syntax, partial streams, XSS).
+  must _never_ break the conversation (invalid syntax, partial streams, XSS).
 
 ## Goals
 
-- Inline rendering of ```` ```mermaid ```` blocks in assistant/plan markdown,
+- Inline rendering of ` ```mermaid ` blocks in assistant/plan markdown,
   with the same polish as the existing image/code affordances (copy source,
   click-to-expand, light/dark theming).
 - Advertise the capability to **every provider that exposes an instruction
@@ -70,16 +70,16 @@ the same lazy-load, cache, error-boundary, streaming, and theming discipline.
 
 Mapped per provider:
 
-| Provider | System/instruction hook | Mechanism |
-|----------|------------------------|-----------|
-| **Codex** | Yes (per-turn, system layer) | `developer_instructions` in `collaborationMode` — `codexAppServerManager.ts` (`CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS`, `CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS`) |
-| **Claude** | Yes (all modes) | `systemPrompt.append` — `ClaudeAdapter.ts` (`EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND`) |
-| Cursor | Plan mode text prefix only | `CursorAdapter.ts` |
-| Grok | Plan mode text prefix only | `provider/planMode.ts` |
-| Gemini | Plan mode text prefix only | `GeminiAdapter.ts` |
-| OpenCode | Plan mode text prefix only | `OpenCodeAdapter.ts` |
-| Kilo | Plan mode text prefix only | shares `OpenCodeAdapter.ts` |
-| Pi | None (plan prefix not even applied) | `PiAdapter.ts` |
+| Provider   | System/instruction hook             | Mechanism                                                                                                                                                            |
+| ---------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Codex**  | Yes (per-turn, system layer)        | `developer_instructions` in `collaborationMode` — `codexAppServerManager.ts` (`CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS`, `CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS`) |
+| **Claude** | Yes (all modes)                     | `systemPrompt.append` — `ClaudeAdapter.ts` (`EMBEDDED_CLAUDE_SYSTEM_PROMPT_APPEND`)                                                                                  |
+| Cursor     | Plan mode text prefix only          | `CursorAdapter.ts`                                                                                                                                                   |
+| Grok       | Plan mode text prefix only          | `provider/planMode.ts`                                                                                                                                               |
+| Gemini     | Plan mode text prefix only          | `GeminiAdapter.ts`                                                                                                                                                   |
+| OpenCode   | Plan mode text prefix only          | `OpenCodeAdapter.ts`                                                                                                                                                 |
+| Kilo       | Plan mode text prefix only          | shares `OpenCodeAdapter.ts`                                                                                                                                          |
+| Pi         | None (plan prefix not even applied) | `PiAdapter.ts`                                                                                                                                                       |
 
 The one **universal** hook is the orchestration layer: `ProviderCommandReactor.ts`
 (~lines 904–926) already inlines skill instructions into the outgoing provider
@@ -96,7 +96,7 @@ capability preamble for any provider, in any mode.
 - Memoized `import("mermaid")` behind a module-level promise so Mermaid's heavy
   bundle (mermaid + dagre + d3) never lands in the initial chunk.
 - One-time `mermaid.initialize({ startOnLoad: false, securityLevel: "strict",
-  htmlLabels: false, theme: <mapped> })`.
+htmlLabels: false, theme: <mapped> })`.
 - `renderMermaidToSvg(code, theme)` using `mermaid.parse` (validation) then
   `mermaid.render`. Throws on invalid input (caught upstream).
 - Render cache keyed by `(code, mermaidTheme)`, same LRU shape and helpers as the
@@ -131,7 +131,7 @@ server module, reused at every injection point so wording never drifts. Draft
 wording (concise, conditional to avoid over-use):
 
 > When a diagram would make your answer clearer (architecture, flow, sequence,
-> state), output it as a fenced ```` ```mermaid ```` code block — it renders
+> state), output it as a fenced ` ```mermaid ` code block — it renders
 > inline for the user. Use it judiciously, not for trivial points.
 
 Injection:
@@ -147,7 +147,7 @@ Injection:
   conversation history, so injecting once keeps the instruction in context
   without repeating it (and its token cost / history noise) every turn.
 - **Floor:** render-only everywhere. A provider that never saw or ignored the
-  instruction still gets any ```` ```mermaid ```` it emits rendered correctly.
+  instruction still gets any ` ```mermaid ` it emits rendered correctly.
 
 **New state:** a per-thread "capability advertised" flag for the six text-based
 providers (to inject on turn 1 only). Implementation will place this alongside
@@ -165,7 +165,7 @@ existing per-thread orchestration state in `ProviderCommandReactor` /
 
 ## Testing
 
-- `ChatMarkdown`: ```` ```mermaid ```` routes to `MermaidDiagram`; all other
+- `ChatMarkdown`: ` ```mermaid ` routes to `MermaidDiagram`; all other
   fences still route to Shiki.
 - Invalid Mermaid → source-block fallback (no throw).
 - Streaming → source first, diagram after completion.

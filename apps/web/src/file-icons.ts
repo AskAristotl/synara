@@ -8,9 +8,16 @@
 // Generic bracket glyph used whenever a file type has no dedicated Central icon.
 const DEFAULT_FILE_ICON = "code-brackets";
 
+// Lookup keys come from untrusted tokens (chat text, filenames), so tables get a
+// null prototype: a key like "constructor" or "__proto__" must miss instead of
+// resolving to an inherited Object.prototype member.
+function iconTable(entries: Record<string, string>): Record<string, string> {
+  return Object.assign(Object.create(null) as Record<string, string>, entries);
+}
+
 // Exact basename → Central icon name (case-insensitive lookup). Add entries here
 // when a well-known filename has a dedicated icon we want to surface.
-const FILE_ICON_BY_BASENAME: Record<string, string> = {
+const FILE_ICON_BY_BASENAME: Record<string, string> = iconTable({
   "package.json": "npm",
   "package-lock.json": "npm",
   "npm-shrinkwrap.json": "npm",
@@ -51,12 +58,12 @@ const FILE_ICON_BY_BASENAME: Record<string, string> = {
   ".env.production": "settings-gear-1",
   ".env.test": "settings-gear-1",
   ".env.example": "settings-gear-1",
-};
+});
 
 // Extension → Central icon name. Longest extension wins because
 // `extensionCandidates` yields compound extensions first (e.g. `.d.ts` before
 // `.ts`). NOTE: the Python asset ships misspelled upstream as `phyton.svg`.
-const FILE_ICON_BY_EXTENSION: Record<string, string> = {
+const FILE_ICON_BY_EXTENSION: Record<string, string> = iconTable({
   ts: "typescript",
   mts: "typescript",
   cts: "typescript",
@@ -149,7 +156,7 @@ const FILE_ICON_BY_EXTENSION: Record<string, string> = {
   ogg: "audio",
   m4a: "audio",
   aac: "audio",
-};
+});
 
 export function basenameOfPath(pathValue: string): string {
   const slashIndex = Math.max(pathValue.lastIndexOf("/"), pathValue.lastIndexOf("\\"));
@@ -210,7 +217,7 @@ export function getFileIconName(pathValue: string): string {
 // filename has no recognizable extension (e.g. a download named only by its
 // Content-Type, like a UUID carrying a `text/calendar` body). Mirrors the
 // families covered by the extension map so the two stay visually consistent.
-const FILE_ICON_BY_MIME_TYPE: Record<string, string> = {
+const FILE_ICON_BY_MIME_TYPE: Record<string, string> = iconTable({
   "application/pdf": "file-pdf",
   "application/json": "json",
   "application/xml": "code-brackets",
@@ -235,7 +242,7 @@ const FILE_ICON_BY_MIME_TYPE: Record<string, string> = {
   "text/markdown": "markdown",
   "text/html": "code-brackets",
   "text/xml": "code-brackets",
-};
+});
 
 // Attachments default to a neutral document glyph rather than the source-code
 // bracket: an arbitrary upload is far likelier to be a document than code.

@@ -31,6 +31,12 @@ export function getCentralIconUrl(
   name: string,
   variant: CentralIconVariant = DEFAULT_CENTRAL_ICON_VARIANT,
 ): string | null {
+  // Icon names can originate from untyped runtime data (chat tokens, server
+  // payloads); a non-string must degrade to "no icon", not crash the render.
+  if (typeof name !== "string") {
+    return null;
+  }
+
   const normalizedName = name.endsWith(SVG_SUFFIX) ? name.slice(0, -SVG_SUFFIX.length) : name;
 
   if (!CENTRAL_ICON_NAME_PATTERN.test(normalizedName)) {
