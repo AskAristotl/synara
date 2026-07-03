@@ -4,6 +4,7 @@
 
 import type {
   ModelSelection,
+  MessageDispatchOrigin,
   OrchestrationMessageSource,
   TurnDispatchMode,
   OrchestrationLatestTurn,
@@ -106,6 +107,7 @@ export interface ChatMessage {
   skills?: ProviderSkillReference[];
   mentions?: ProviderMentionReference[];
   dispatchMode?: TurnDispatchMode;
+  dispatchOrigin?: MessageDispatchOrigin;
   turnId?: TurnId | null;
   createdAt: string;
   completedAt?: string | undefined;
