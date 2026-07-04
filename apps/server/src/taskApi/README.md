@@ -55,6 +55,34 @@ calling service.
 
 Response: `{"taskId": "<automation run id>", "threadId": "...", "status": "running"}`.
 
+### `GET /api/tasks?name=<exact>[&projectId=...]` → `200`
+
+Read-only lookup of existing runs by **exact** task name (the automation
+definition name; `name` is required, `400` without it), newest first:
+
+```jsonc
+{
+  "tasks": [
+    {
+      "taskId": "...",
+      "threadId": "...",
+      "status": "running",
+      "name": "...",
+      "projectId": "...",
+      "createdAt": "...",
+      "startedAt": "...",
+      "finishedAt": null,
+    },
+  ],
+}
+```
+
+This is the lookup-before-create half of **idempotent dispatch**: derive a
+deterministic `name` (e.g. a thread+turn key) when creating, look it up before
+POSTing, and reuse the newest run instead of double-spawning. Only runs are
+returned — a definition whose `runNow` failed has no run and costs nothing, so
+re-creating after that failure is safe.
+
 ### `GET /api/tasks/:taskId/events?after=N` → `200`
 
 Cursor over the durable orchestration event log, filtered to the task's thread,

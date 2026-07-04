@@ -16,6 +16,11 @@
  *
  * - `POST /api/tasks` — create + immediately run a task. Responds
  *   `{taskId, threadId, status}` where `taskId` is the automation run id.
+ * - `GET /api/tasks?name=<exact>` — read-only lookup of existing runs by the
+ *   task's exact name (optionally scoped with `&projectId=`), newest first.
+ *   This is the lookup-before-create half of idempotent dispatch: an external
+ *   caller derives a deterministic name (e.g. thread+turn key), looks it up,
+ *   and only POSTs when no run exists yet.
  * - `GET /api/tasks/:id/events?after=N` — cursor over the durable
  *   orchestration event log filtered to the task's thread (see `./events.ts`
  *   for the external union), plus a per-poll snapshot of the run row, the
@@ -261,6 +266,57 @@ const createTaskRoute = HttpRouter.add(
   ),
 );
 
+/**
+ * Read-only lookup by exact task name for idempotent dispatch. Task names are
+ * automation-definition names, so this lists (non-archived) definitions via
+ * `AutomationService.list` and returns their runs newest-first. Only RUNS are
+ * returned: a definition whose `runNow` never produced a run costs nothing,
+ * so a re-create after that failure is safe — the double-spawn hazard is the
+ * run, not the definition.
+ */
+const listTasksRoute = HttpRouter.add(
+  "GET",
+  TASK_API_ROUTE_PATH,
+  handled(
+    Effect.gen(function* () {
+      yield* requireAuthenticated;
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const url = HttpServerRequest.toURL(request);
+      if (!url) return yield* respondWith(400, "Bad Request");
+      const name = url.searchParams.get("name")?.trim();
+      if (!name) {
+        return yield* respondWith(
+          400,
+          "Query parameter `name` is required (exact-match task lookup).",
+        );
+      }
+      const rawProjectId = url.searchParams.get("projectId");
+
+      const automationService = yield* AutomationService;
+      const listed = yield* automationService.list(
+        rawProjectId ? { projectId: ProjectId.makeUnsafe(rawProjectId) } : {},
+      );
+      const matchingDefinitionIds = new Set(
+        listed.definitions.filter((definition) => definition.name === name).map((d) => d.id),
+      );
+      const tasks = listed.runs
+        .filter((run) => matchingDefinitionIds.has(run.automationId))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((run) => ({
+          taskId: run.id,
+          threadId: run.threadId,
+          status: run.status,
+          name,
+          projectId: run.projectId,
+          createdAt: run.createdAt,
+          startedAt: run.startedAt,
+          finishedAt: run.finishedAt,
+        }));
+      return HttpServerResponse.jsonUnsafe({ tasks });
+    }),
+  ),
+);
+
 function parseAfterCursor(raw: string | null): number {
   if (raw === null) return 0;
   const parsed = Number.parseInt(raw, 10);
@@ -419,4 +475,9 @@ const taskInputRoute = HttpRouter.add(
   ),
 );
 
-export const taskApiRouteLayer = Layer.mergeAll(createTaskRoute, taskEventsRoute, taskInputRoute);
+export const taskApiRouteLayer = Layer.mergeAll(
+  createTaskRoute,
+  listTasksRoute,
+  taskEventsRoute,
+  taskInputRoute,
+);

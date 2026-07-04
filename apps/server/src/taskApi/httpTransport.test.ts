@@ -23,6 +23,8 @@ import {
   TurnId,
   type ApprovalRequestId,
   type AutomationCreateInput,
+  type AutomationDefinition,
+  type AutomationListResult,
   type AutomationRun,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -131,6 +133,8 @@ let projectShell: Option.Option<OrchestrationProjectShell> = Option.some(project
 let pendingApprovalRows: ReadonlyArray<ProjectionPendingApproval> = [];
 let lastKnownPr: OrchestrationThreadPullRequest | null = null;
 let createFailure: AutomationServiceError | null = null;
+let listResult: AutomationListResult = { definitions: [], runs: [] };
+let listInputs: unknown[] = [];
 
 function resetHarness() {
   createdInputs = [];
@@ -142,6 +146,8 @@ function resetHarness() {
   pendingApprovalRows = [];
   lastKnownPr = null;
   createFailure = null;
+  listResult = { definitions: [], runs: [] };
+  listInputs = [];
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +178,10 @@ const fakeAutomationService = {
   runNow: (input: { readonly automationId: string }) => {
     runNowInputs.push(input);
     return Effect.succeed({ run: makeRun() });
+  },
+  list: (input?: unknown) => {
+    listInputs.push(input);
+    return Effect.succeed(listResult);
   },
 } as unknown as AutomationServiceShape;
 
@@ -370,6 +380,7 @@ describe("taskApiRouteLayer", () => {
   describe("auth", () => {
     it.each([
       ["POST /api/tasks", "/api/tasks", { method: "POST" }],
+      ["GET /api/tasks", "/api/tasks?name=x", { method: "GET" }],
       [`GET /api/tasks/:id/events`, `/api/tasks/${runId}/events`, { method: "GET" }],
       [`POST /api/tasks/:id/input`, `/api/tasks/${runId}/input`, { method: "POST" }],
     ])("rejects %s without a bearer token", async (_label, path, init) => {
@@ -542,6 +553,90 @@ describe("taskApiRouteLayer", () => {
         expect(response.status).toBe(400);
         const json = (await response.json()) as { error: string };
         expect(json.error).toContain("full access");
+      });
+    });
+  });
+
+  describe("GET /api/tasks (lookup by name)", () => {
+    /** Minimal definition fixture — the route reads only `id` and `name`. */
+    function makeDefinition(id: string, name: string): AutomationDefinition {
+      return { id: AutomationId.makeUnsafe(id), name } as unknown as AutomationDefinition;
+    }
+
+    it("requires the name query parameter", async () => {
+      resetHarness();
+      await withRunningTransport(async (origin) => {
+        const response = await fetch(`${origin}/api/tasks`, authorizedInit());
+        expect(response.status).toBe(400);
+        const json = (await response.json()) as { error: string };
+        expect(json.error).toContain("name");
+      });
+    });
+
+    it("returns runs of exact-name definitions newest-first and skips other names", async () => {
+      resetHarness();
+      const matchingA = makeDefinition("automation:match-a", "task:thread-1:turn-2");
+      const matchingB = makeDefinition("automation:match-b", "task:thread-1:turn-2");
+      const other = makeDefinition("automation:other", "task:thread-9:turn-9");
+      const olderRun = makeRun({
+        id: AutomationRunId.makeUnsafe("automation-run:older"),
+        automationId: matchingA.id,
+        status: "succeeded",
+        createdAt: "2026-07-03T09:00:00.000Z",
+        finishedAt: "2026-07-03T09:05:00.000Z",
+      });
+      const newerRun = makeRun({
+        id: AutomationRunId.makeUnsafe("automation-run:newer"),
+        automationId: matchingB.id,
+        createdAt: "2026-07-03T11:00:00.000Z",
+      });
+      const unrelatedRun = makeRun({
+        id: AutomationRunId.makeUnsafe("automation-run:unrelated"),
+        automationId: other.id,
+      });
+      listResult = {
+        definitions: [matchingA, matchingB, other],
+        runs: [olderRun, unrelatedRun, newerRun],
+      };
+      await withRunningTransport(async (origin) => {
+        const response = await fetch(
+          `${origin}/api/tasks?name=${encodeURIComponent("task:thread-1:turn-2")}`,
+          authorizedInit(),
+        );
+        expect(response.status).toBe(200);
+        const json = (await response.json()) as {
+          tasks: ReadonlyArray<{ taskId: string; status: string; name: string }>;
+        };
+        expect(json.tasks.map((task) => task.taskId)).toEqual([
+          "automation-run:newer",
+          "automation-run:older",
+        ]);
+        expect(json.tasks[0]).toEqual({
+          taskId: "automation-run:newer",
+          threadId,
+          status: "running",
+          name: "task:thread-1:turn-2",
+          projectId,
+          createdAt: "2026-07-03T11:00:00.000Z",
+          startedAt: now,
+          finishedAt: null,
+        });
+        // Unfiltered list call (no projectId given).
+        expect(listInputs).toEqual([{}]);
+      });
+    });
+
+    it("scopes the lookup with the optional projectId filter", async () => {
+      resetHarness();
+      await withRunningTransport(async (origin) => {
+        const response = await fetch(
+          `${origin}/api/tasks?name=nothing-here&projectId=${projectId}`,
+          authorizedInit(),
+        );
+        expect(response.status).toBe(200);
+        const json = (await response.json()) as { tasks: ReadonlyArray<unknown> };
+        expect(json.tasks).toEqual([]);
+        expect(listInputs).toEqual([{ projectId }]);
       });
     });
   });
