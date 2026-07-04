@@ -42,6 +42,10 @@ calling service.
   "modelSelection": { "provider": "cursor", "model": "auto" }, // optional; falls back to the project's default model (400 if neither exists)
   "providerOptions": { "cursor": { "binaryPath": "..." } },    // optional passthrough
   "worktreeMode": "auto" | "local" | "worktree",                // optional, default "auto"
+  "baseBranch": "main",                                         // optional; fetch origin/<baseBranch> and start the run worktree from ITS LATEST TIP.
+                                                                //   Omitted = branch off the workspace's checked-out local tip (no fetch, legacy behavior).
+                                                                //   Requires the workspace to be a git repo with an `origin` remote; a failed fetch FAILS
+                                                                //   the run (no silent local-checkout fallback) so a task never silently starts stale.
   "runtimeMode": "approval-required" | ...,                     // optional, default "approval-required"
   "interactionMode": "...",                                     // optional passthrough
   "acknowledgedRisks": ["full-access" | "local-checkout" | "fast-interval"], // required in practice for full-access / non-repo local checkouts — create hard-fails without it
@@ -147,3 +151,8 @@ run reaches `succeeded` in ~1s.
   clutters the automations UI. Archive-on-terminal is the obvious follow-up.
 - **No terminal event** exists in the union; treat `run.status` (snapshot) as
   the source of truth for terminality.
+- **`baseBranch` assumes a remote named `origin`** on the studio workspace
+  (the common case). A workspace without one fails the run with the fetch
+  error. Note effect Schema ignores unknown body keys, so a caller sending
+  `baseBranch` to an older server is silently accepted and gets the legacy
+  checked-out-branch behavior — coordinate deploys.

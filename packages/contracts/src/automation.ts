@@ -200,6 +200,15 @@ export const AutomationDefinition = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   worktreeMode: AutomationWorktreeMode,
+  /**
+   * Branch whose LATEST ORIGIN state standalone runs branch from: dispatch
+   * fetches `origin/<baseBranch>` before creating the run worktree. Null =
+   * today's behavior (branch off the workspace's checked-out local tip).
+   * Heartbeat runs reuse their target thread and ignore this.
+   */
+  baseBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
   mode: AutomationMode,
   /** Heartbeat target thread continued on each wake. Null for standalone automations. */
   targetThreadId: Schema.NullOr(ThreadId),
@@ -253,6 +262,10 @@ const AutomationDefinitionConfig = Schema.Struct({
   ),
   worktreeMode: Schema.optional(AutomationWorktreeMode).pipe(
     Schema.withDecodingDefault(() => "auto" as const),
+  ),
+  /** See `AutomationDefinition.baseBranch` — null/omitted keeps today's checked-out-branch behavior. */
+  baseBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(() => null),
   ),
   mode: Schema.optional(AutomationMode).pipe(
     Schema.withDecodingDefault(() => "standalone" as const),

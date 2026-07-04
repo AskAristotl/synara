@@ -21,8 +21,12 @@
  *
  * @module taskApi.integration.test
  */
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -34,7 +38,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { Effect, Exit, Layer, ManagedRuntime, Scope } from "effect";
+import { Effect, Exit, Layer, ManagedRuntime, Option, Scope } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { describe, expect, it } from "vitest";
 
@@ -45,7 +49,12 @@ import {
   type AutomationServiceShape,
 } from "../automation/Services/AutomationService.ts";
 import { ServerConfig } from "../config.ts";
+import { GitCoreLive } from "../git/Layers/GitCore.ts";
 import { GitCore, type GitCoreShape } from "../git/Services/GitCore.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { TextGeneration, type TextGenerationShape } from "../git/Services/TextGeneration.ts";
 import {
   OrchestrationEngineService,
@@ -106,9 +115,13 @@ interface IntegrationContext {
   readonly origin: string;
   readonly engine: OrchestrationEngineShape;
   readonly automationService: AutomationServiceShape;
+  readonly projection: ProjectionSnapshotQueryShape;
 }
 
-async function withIntegrationStack(run: (ctx: IntegrationContext) => Promise<void>) {
+async function withIntegrationStack(
+  run: (ctx: IntegrationContext) => Promise<void>,
+  options: { readonly realGit?: boolean } = {},
+) {
   const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "t3-task-api-integration-test-",
   });
@@ -117,13 +130,18 @@ async function withIntegrationStack(run: (ctx: IntegrationContext) => Promise<vo
     Layer.provideMerge(serverConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
+  // realGit: the true GitCore over the same test ServerConfig (worktrees land
+  // in the scoped temp baseDir) — used by the baseBranch fixture tests.
+  const gitCoreLayer = options.realGit
+    ? GitCoreLive.pipe(Layer.provide(serverConfigLayer), Layer.provide(NodeServices.layer))
+    : Layer.succeed(GitCore, gitCoreStub);
   const automationLayer = AutomationServiceLive.pipe(
     Layer.provideMerge(AutomationRepositoryLive),
     Layer.provideMerge(ProjectionTurnRepositoryLive),
     Layer.provideMerge(orchestrationLayer),
     Layer.provide(Layer.succeed(TextGeneration, textGenerationStub)),
     Layer.provide(ServerSettingsService.layerTest()),
-    Layer.provide(Layer.succeed(GitCore, gitCoreStub)),
+    Layer.provide(gitCoreLayer),
   );
   const fullLayer = Layer.mergeAll(
     automationLayer,
@@ -153,6 +171,7 @@ async function withIntegrationStack(run: (ctx: IntegrationContext) => Promise<vo
           return {
             engine: yield* OrchestrationEngineService,
             automationService: yield* AutomationService,
+            projection: yield* ProjectionSnapshotQuery,
           };
         }),
         scope,
@@ -331,4 +350,176 @@ describe("task API end-to-end (real engine + real AutomationService)", () => {
       expect(assistantMessages.at(-1)?.text).toBe("The repo is a Bun + Effect monorepo.");
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// baseBranch (real git fixture)
+// ---------------------------------------------------------------------------
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    },
+  }).trim();
+}
+
+/**
+ * Upstream repo + workspace clone where origin/main is AHEAD of the clone:
+ * commit A is cloned, then commit B lands upstream only. The clone's local
+ * `main` (and its stale remote-tracking ref) stay at A — a run worktree at B
+ * therefore PROVES dispatch fetched origin.
+ */
+function makeStaleCloneFixture(root: string): {
+  upstream: string;
+  workspace: string;
+  commitA: string;
+  commitB: string;
+} {
+  const upstream = join(root, "upstream");
+  const workspace = join(root, "workspace");
+  git(root, "init", "-b", "main", upstream);
+  git(upstream, "commit", "--allow-empty", "-m", "A");
+  const commitA = git(upstream, "rev-parse", "HEAD");
+  git(root, "clone", upstream, workspace);
+  git(upstream, "commit", "--allow-empty", "-m", "B");
+  const commitB = git(upstream, "rev-parse", "HEAD");
+  return { upstream, workspace, commitA, commitB };
+}
+
+async function createProjectAndTask(
+  ctx: IntegrationContext,
+  workspaceRoot: string,
+  body: Record<string, unknown>,
+): Promise<{ taskId: string; threadId: string; status: string }> {
+  const projectId = ProjectId.makeUnsafe(randomUUID());
+  await Effect.runPromise(
+    ctx.engine.dispatch({
+      type: "project.create",
+      commandId: CommandId.makeUnsafe(`cmd-project-create-${randomUUID()}`),
+      projectId,
+      title: "Task API baseBranch project",
+      workspaceRoot,
+      defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  const response = await fetch(`${ctx.origin}/api/tasks`, authorizedInit({ projectId, ...body }));
+  expect(response.status).toBe(201);
+  return (await response.json()) as { taskId: string; threadId: string; status: string };
+}
+
+/** Poll the projected thread shell for its worktree path (projection is engine-async). */
+async function threadWorktreePath(ctx: IntegrationContext, threadId: string): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const shellOption = await Effect.runPromise(
+      ctx.projection.getThreadShellById(ThreadId.makeUnsafe(threadId)),
+    );
+    if (Option.isSome(shellOption)) {
+      const shell = shellOption.value as { worktreePath: string | null };
+      if (shell.worktreePath) {
+        return shell.worktreePath;
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`thread ${threadId} never projected a worktree path`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+describe("task API baseBranch (real git + real AutomationService)", () => {
+  it("fetches origin/<baseBranch> so the run worktree starts from the LATEST origin tip", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-task-api-basebranch-"));
+    try {
+      const fixture = makeStaleCloneFixture(root);
+      await withIntegrationStack(
+        async (ctx) => {
+          const created = await createProjectAndTask(ctx, fixture.workspace, {
+            prompt: "Start from latest origin main",
+            baseBranch: "main",
+          });
+          expect(created.status).toBe("running");
+          const worktree = await threadWorktreePath(ctx, created.threadId);
+          // The worktree HEAD is upstream's commit B — which only a fetch
+          // could have delivered (the clone's local/remote-tracking main is A).
+          expect(git(worktree, "rev-parse", "HEAD")).toBe(fixture.commitB);
+          expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toContain("automation/");
+        },
+        { realGit: true },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("without baseBranch keeps today's behavior: branches off the stale checked-out local tip", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-task-api-basebranch-ctl-"));
+    try {
+      const fixture = makeStaleCloneFixture(root);
+      await withIntegrationStack(
+        async (ctx) => {
+          const created = await createProjectAndTask(ctx, fixture.workspace, {
+            prompt: "Legacy current-branch behavior",
+          });
+          expect(created.status).toBe("running");
+          const worktree = await threadWorktreePath(ctx, created.threadId);
+          // No fetch: the run worktree branches from the clone's local main (A),
+          // NOT upstream's newer B.
+          expect(git(worktree, "rev-parse", "HEAD")).toBe(fixture.commitA);
+        },
+        { realGit: true },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("fails the run hard when the baseBranch fetch cannot succeed (no silent stale fallback)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "t3-task-api-basebranch-err-"));
+    try {
+      const fixture = makeStaleCloneFixture(root);
+      await withIntegrationStack(
+        async (ctx) => {
+          const projectId = ProjectId.makeUnsafe(randomUUID());
+          await Effect.runPromise(
+            ctx.engine.dispatch({
+              type: "project.create",
+              commandId: CommandId.makeUnsafe(`cmd-project-create-${randomUUID()}`),
+              projectId,
+              title: "Task API baseBranch missing-branch project",
+              workspaceRoot: fixture.workspace,
+              defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+              createdAt: new Date().toISOString(),
+            }),
+          );
+          const response = await fetch(
+            `${ctx.origin}/api/tasks`,
+            authorizedInit({
+              projectId,
+              prompt: "Fetch a branch origin does not have",
+              baseBranch: "no-such-branch",
+              // Would allow the auto-mode local fallback — baseBranch must
+              // still refuse to degrade to the stale local checkout.
+              acknowledgedRisks: ["local-checkout"],
+            }),
+          );
+          // runNow surfaces the dispatch failure as an AutomationServiceError → 400.
+          expect(response.status).toBe(400);
+          const json = (await response.json()) as { error: string };
+          expect(json.error).toContain("no-such-branch");
+        },
+        { realGit: true },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

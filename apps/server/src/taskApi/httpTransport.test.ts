@@ -443,6 +443,35 @@ describe("taskApiRouteLayer", () => {
       });
     });
 
+    it("honors baseBranch onto the created automation definition", async () => {
+      resetHarness();
+      await withRunningTransport(async (origin) => {
+        const response = await fetch(
+          `${origin}/api/tasks`,
+          authorizedInit({
+            projectId,
+            prompt: "Fix the login flow",
+            baseBranch: "main",
+          }),
+        );
+        expect(response.status).toBe(201);
+        const created = createdInputs[0]!;
+        expect(created.baseBranch).toBe("main");
+      });
+    });
+
+    it("defaults baseBranch to null when omitted (legacy checked-out-branch behavior)", async () => {
+      resetHarness();
+      await withRunningTransport(async (origin) => {
+        const response = await fetch(
+          `${origin}/api/tasks`,
+          authorizedInit({ projectId, prompt: "No pinned base" }),
+        );
+        expect(response.status).toBe(201);
+        expect(createdInputs[0]!.baseBranch ?? null).toBeNull();
+      });
+    });
+
     it("appends the PR delivery instruction when deliverPr is set", async () => {
       resetHarness();
       await withRunningTransport(async (origin) => {

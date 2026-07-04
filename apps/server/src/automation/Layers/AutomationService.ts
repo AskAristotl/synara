@@ -747,10 +747,22 @@ export const AutomationServiceLive = Layer.effect(
         return requireLocalCheckoutAcknowledgement().pipe(Effect.as(localThreadEnvironment));
       }
 
+      const baseBranch = definition.baseBranch ?? null;
+
       return git.statusDetails(project.workspaceRoot).pipe(
         Effect.mapError(toServiceError("Failed to inspect project Git status.")),
         Effect.flatMap((status) => {
-          if (!status.isRepo || !status.branch) {
+          // A pinned base branch only needs a repo (detached HEAD is fine —
+          // the run branch comes from origin, not the current checkout);
+          // today's behavior additionally needs a checked-out branch to copy.
+          if (!status.isRepo || (!status.branch && baseBranch === null)) {
+            if (baseBranch !== null) {
+              return Effect.fail(
+                new AutomationServiceError({
+                  message: `Automation base branch "${baseBranch}" requires the project workspace to be a Git repository.`,
+                }),
+              );
+            }
             return definition.worktreeMode === "worktree"
               ? Effect.fail(
                   new AutomationServiceError({
@@ -763,33 +775,70 @@ export const AutomationServiceLive = Layer.effect(
 
           const sourceBranch = status.branch;
           const branch = makeAutomationBranchName(definition, runId);
+          // baseBranch set: fetch the LATEST origin/<baseBranch> and
+          // materialize it as the run branch, then attach the worktree to it
+          // (no -b). fetchRemoteBranch uses `git branch --force`, which is
+          // safe here ONLY because `branch` is the freshly minted
+          // automation/<slug>/<run-suffix> name — never a user branch.
+          // Otherwise: today's behavior, branch off the checked-out local tip.
+          const createRunWorktree =
+            baseBranch !== null
+              ? git
+                  .fetchRemoteBranch({
+                    cwd: project.workspaceRoot,
+                    remoteName: "origin",
+                    remoteBranch: baseBranch,
+                    localBranch: branch,
+                  })
+                  .pipe(
+                    Effect.mapError(
+                      toServiceError(
+                        `Failed to fetch origin/${baseBranch} for the automation base branch.`,
+                      ),
+                    ),
+                    Effect.flatMap(() =>
+                      git
+                        .createWorktree({
+                          cwd: project.workspaceRoot,
+                          branch,
+                          path: null,
+                        })
+                        .pipe(
+                          Effect.mapError(toServiceError("Failed to create automation worktree.")),
+                        ),
+                    ),
+                  )
+              : git
+                  .createWorktree({
+                    cwd: project.workspaceRoot,
+                    // Guarded above: without a baseBranch, status.branch is set.
+                    branch: sourceBranch ?? branch,
+                    newBranch: branch,
+                    path: null,
+                  })
+                  .pipe(Effect.mapError(toServiceError("Failed to create automation worktree.")));
           return beforeWorktreeCreate().pipe(
             Effect.flatMap(() =>
-              git
-                .createWorktree({
-                  cwd: project.workspaceRoot,
-                  branch: sourceBranch,
-                  newBranch: branch,
-                  path: null,
-                })
-                .pipe(
-                  Effect.mapError(toServiceError("Failed to create automation worktree.")),
-                  Effect.map(
-                    (result): ThreadEnvironment => ({
-                      envMode: "worktree",
-                      branch: result.worktree.branch,
-                      worktreePath: result.worktree.path,
-                      associatedWorktreePath: result.worktree.path,
-                      associatedWorktreeBranch: result.worktree.branch,
-                      associatedWorktreeRef: result.worktree.branch,
-                    }),
-                  ),
+              createRunWorktree.pipe(
+                Effect.map(
+                  (result): ThreadEnvironment => ({
+                    envMode: "worktree",
+                    branch: result.worktree.branch,
+                    worktreePath: result.worktree.path,
+                    associatedWorktreePath: result.worktree.path,
+                    associatedWorktreeBranch: result.worktree.branch,
+                    associatedWorktreeRef: result.worktree.branch,
+                  }),
                 ),
+              ),
             ),
           );
         }),
+        // A pinned base branch means "start from the latest origin/<base>" —
+        // degrading to the stale local checkout would silently betray that,
+        // so baseBranch runs fail hard instead of taking the auto fallback.
         Effect.catch((error) =>
-          definition.worktreeMode === "auto"
+          definition.worktreeMode === "auto" && baseBranch === null
             ? requireLocalCheckoutAcknowledgement().pipe(Effect.as(localThreadEnvironment))
             : Effect.fail(error),
         ),

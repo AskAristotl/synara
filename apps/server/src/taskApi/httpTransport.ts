@@ -92,6 +92,12 @@ const TaskCreateRequest = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   providerOptions: Schema.optional(ProviderStartOptions),
   worktreeMode: Schema.optional(AutomationWorktreeMode),
+  /**
+   * Branch whose LATEST ORIGIN state the task starts from: dispatch fetches
+   * `origin/<baseBranch>` and bases the run worktree on it. Omitted = today's
+   * behavior (branch off the workspace's checked-out local tip, no fetch).
+   */
+  baseBranch: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
   acknowledgedRisks: Schema.optional(
@@ -236,6 +242,7 @@ const createTaskRoute = HttpRouter.add(
         modelSelection,
         ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
         ...(input.worktreeMode ? { worktreeMode: input.worktreeMode } : {}),
+        ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
         ...(input.runtimeMode ? { runtimeMode: input.runtimeMode } : {}),
         ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
         ...(input.acknowledgedRisks ? { acknowledgedRisks: input.acknowledgedRisks } : {}),
