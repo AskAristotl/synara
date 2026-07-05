@@ -128,6 +128,7 @@ function createProjectionStub(
     findSyntheticSubagentParentThread: unused,
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
+    getThreadDetailForExportById: unused,
   };
 }
 
@@ -299,6 +300,7 @@ function buildWaitHarness(
     getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
     dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
     repairState: () => Effect.die(new Error("repairState unused in test")),
+    refreshCommandReadModel: () => Effect.die(new Error("refreshCommandReadModel unused in test")),
     streamDomainEvents: Stream.fromPubSub(eventPubSub),
     subscribeDomainEvents: Effect.sync(() => {
       subscribeCalls += 1;
@@ -376,6 +378,7 @@ function createMidSeedProjectionStub(
     findSyntheticSubagentParentThread: unused,
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
+    getThreadDetailForExportById: unused,
   };
 }
 
@@ -406,6 +409,7 @@ function buildMidSeedWaitHarness(midSeedThreadId: ThreadId, midSeedEvent: Orches
     getReadModel: () => Effect.die(new Error("getReadModel unused in test")),
     dispatch: () => Effect.die(new Error("dispatch unused in wait test")),
     repairState: () => Effect.die(new Error("repairState unused in test")),
+    refreshCommandReadModel: () => Effect.die(new Error("refreshCommandReadModel unused in test")),
     streamDomainEvents: Stream.fromPubSub(eventPubSub),
     subscribeDomainEvents: PubSub.subscribe(eventPubSub),
   };
@@ -456,6 +460,7 @@ function createRecordingEngine() {
         return { sequence: commands.length };
       }),
     repairState: () => Effect.die(new Error("repairState unused in test")),
+    refreshCommandReadModel: () => Effect.die(new Error("refreshCommandReadModel unused in test")),
     streamDomainEvents: Stream.empty,
     subscribeDomainEvents: Effect.die(new Error("subscribeDomainEvents unused in test")),
   };
