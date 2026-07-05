@@ -2,7 +2,7 @@
 // Purpose: Builds Claude subprocess environments that prefer valid local Claude CLI OAuth.
 // Layer: Provider utility shared by Claude runtime sessions and provider health probes.
 // Exports: Claude credentials parsing, path resolution, and env sanitization helpers.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import OS from "node:os";
 import nodePath from "node:path";
 
@@ -148,4 +148,86 @@ export function buildClaudeProcessEnv(input?: {
     delete env[key];
   }
   return env;
+}
+
+// Known absolute directories that hold the Claude Code CLI on POSIX platforms, ordered
+// from most to least specific. The native installer symlinks `~/.local/bin/claude`; older
+// installs live under `~/.claude/local`; Homebrew and manual installs use the usual bins.
+function knownPosixClaudeExecutableDirs(homeDir: string): ReadonlyArray<string> {
+  return [
+    nodePath.join(homeDir, ".local", "bin"),
+    nodePath.join(homeDir, ".claude", "local"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+  ];
+}
+
+function defaultClaudeExecutableExists(path: string): boolean {
+  try {
+    return existsSync(path);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves the Claude Code CLI to an absolute path so the SDK subprocess does not depend
+ * on the host process's `PATH`. A GUI/desktop launch (macOS Dock/launchd) inherits a
+ * minimal `PATH` that omits `~/.local/bin`, so spawning the bare name `"claude"` fails with
+ * ENOENT ("native binary not found at claude") even though the CLI works in a terminal.
+ *
+ * Resolution order:
+ *  1. An explicitly configured `binaryPath` is honored verbatim (the user's override).
+ *  2. The first `claude` found on the subprocess `PATH` (mirrors terminal resolution order).
+ *  3. The first `claude` found in a known install location (covers an un-hydrated `PATH`).
+ *  4. The bare name `"claude"` as a last resort (lets the OS/SDK resolve it, preserving the
+ *     prior behavior when nothing else matched).
+ *
+ * Windows is intentionally left to OS/`PATHEXT` resolution: `claude` is commonly a
+ * `.cmd`/`.ps1` shim that must launch through the shell, so returning an absolute path to it
+ * could break `spawn()`.
+ */
+export function resolveClaudeExecutablePath(input?: {
+  readonly binaryPath?: string | null | undefined;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly homeDir?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly fileExists?: (path: string) => boolean;
+}): string {
+  const configured = trimToUndefined(input?.binaryPath ?? undefined);
+  if (configured) {
+    return configured;
+  }
+
+  const platform = input?.platform ?? process.platform;
+  if (platform === "win32") {
+    return "claude";
+  }
+
+  const env = input?.env ?? process.env;
+  const fileExists = input?.fileExists ?? defaultClaudeExecutableExists;
+  // Use the real OS home rather than a Synara profile home override: the CLI is installed
+  // under the user's account, not the app's data directory.
+  const homeDir = trimToUndefined(input?.homeDir) ?? OS.homedir();
+
+  for (const dir of (env.PATH ?? "").split(nodePath.delimiter)) {
+    const entry = dir.trim();
+    if (!entry) {
+      continue;
+    }
+    const candidate = nodePath.join(entry, "claude");
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const dir of knownPosixClaudeExecutableDirs(homeDir)) {
+    const candidate = nodePath.join(dir, "claude");
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "claude";
 }

@@ -279,6 +279,38 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("returns validation error when the session cwd no longer exists", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const missingCwd = "/tmp/claude-adapter-test-missing-workspace-dir";
+      const result = yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          runtimeMode: "full-access",
+          cwd: missingCwd,
+        })
+        .pipe(Effect.result);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") {
+        return;
+      }
+      assert.deepEqual(
+        result.failure,
+        new ProviderAdapterValidationError({
+          provider: "claudeAgent",
+          operation: "startSession",
+          issue: `Workspace directory '${missingCwd}' no longer exists. Recreate the worktree or start a new session in an existing directory.`,
+        }),
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("derives bypass permission mode from full-access runtime policy", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
