@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { prepareWindowsSafeProcess } from "@t3tools/shared/windowsProcess";
 import {
   Cause,
@@ -178,6 +179,9 @@ const makeAcpSessionRuntime = (
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallState>());
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
+    // Unique per runtime instance so assistant message ids never collide across
+    // server restarts or session resumes (segment index resets to 0 each time).
+    const runtimeInstanceId = randomUUID().slice(0, 8);
     const configOptionsRef = yield* Ref.make(sessionConfigOptionsFromSetup(undefined));
     const startStateRef = yield* Ref.make<AcpStartState>({ _tag: "NotStarted" });
     // session/load can replay a large history before the consumer attaches; drop
@@ -283,6 +287,7 @@ const makeAcpSessionRuntime = (
               modeStateRef,
               toolCallsRef,
               assistantSegmentRef,
+              runtimeInstanceId,
               params: notification,
             })
           : Effect.void,
@@ -670,12 +675,14 @@ const handleSessionUpdate = ({
   modeStateRef,
   toolCallsRef,
   assistantSegmentRef,
+  runtimeInstanceId,
   params,
 }: {
   readonly offer: (event: AcpParsedSessionEvent) => Effect.Effect<void>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
+  readonly runtimeInstanceId: string;
   readonly params: EffectAcpSchema.SessionNotification;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -727,6 +734,7 @@ const handleSessionUpdate = ({
           offer,
           assistantSegmentRef,
           sessionId: params.sessionId,
+          runtimeInstanceId,
           requestedItemId: event.itemId,
         });
         yield* offer({
@@ -771,18 +779,23 @@ function shouldEmitToolCallUpdate(
   return previous.detail !== next.detail;
 }
 
-const assistantItemId = (sessionId: string, segmentIndex: number) =>
-  `assistant:${sessionId}:segment:${segmentIndex}`;
+export const assistantItemId = (
+  sessionId: string,
+  runtimeInstanceId: string,
+  segmentIndex: number,
+) => `assistant:${sessionId}:${runtimeInstanceId}:segment:${segmentIndex}`;
 
 const ensureActiveAssistantSegment = ({
   offer,
   assistantSegmentRef,
   sessionId,
+  runtimeInstanceId,
   requestedItemId,
 }: {
   readonly offer: (event: AcpParsedSessionEvent) => Effect.Effect<void>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
+  readonly runtimeInstanceId: string;
   readonly requestedItemId?: string | undefined;
 }) =>
   Ref.modify<AcpAssistantSegmentState, EnsureActiveAssistantSegmentResult>(
@@ -796,7 +809,8 @@ const ensureActiveAssistantSegment = ({
       }
       // Cursor can provide stable message ids for chunks that resume after tool calls.
       // Keep those ids so projection appends the pieces instead of displaying broken segments.
-      const itemId = requestedItemId ?? assistantItemId(sessionId, current.nextSegmentIndex);
+      const itemId =
+        requestedItemId ?? assistantItemId(sessionId, runtimeInstanceId, current.nextSegmentIndex);
       const completedEvent = current.activeItemId
         ? ({
             _tag: "AssistantItemCompleted",

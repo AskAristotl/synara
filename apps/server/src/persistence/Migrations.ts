@@ -67,6 +67,9 @@ import Migration0048 from "./Migrations/048_AutomationCompletionEvaluationBacklo
 import Migration0049 from "./Migrations/049_ProjectionThreadMessagesDispatchOrigin.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadsSubagentApproval.ts";
 import Migration0051 from "./Migrations/051_AutomationBaseBranch.ts";
+// Upstream numbers this 050; renumbered 052 here so dev DBs that already
+// applied our 050/051 only run the one genuinely new migration.
+import Migration0052 from "./Migrations/052_ProfileStatsArchive.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -130,6 +133,7 @@ export const migrationEntries = [
   [49, "ProjectionThreadMessagesDispatchOrigin", Migration0049],
   [50, "ProjectionThreadsSubagentApproval", Migration0050],
   [51, "AutomationBaseBranch", Migration0051],
+  [52, "ProfileStatsArchive", Migration0052],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
