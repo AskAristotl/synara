@@ -140,7 +140,7 @@ describe("resolveSelectableModel", () => {
         { slug: "claude-sonnet-5", name: "Claude Sonnet 5" },
         { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
       ]),
-    ).toBe("claude-sonnet-5");
+    ).toBe("claude-sonnet-4-6");
   });
 
   it("returns null for empty input", () => {
@@ -280,13 +280,14 @@ describe("getModelCapabilities reasoningEffortLevels", () => {
     ]);
   });
 
-  it("returns claude effort options for Sonnet 5 without the ultra tiers", () => {
+  it("returns claude effort options for Sonnet 5 (ultracode, no ultrathink)", () => {
     expect(values("claudeAgent", "claude-sonnet-5")).toEqual([
       "low",
       "medium",
       "high",
       "xhigh",
       "max",
+      "ultracode",
     ]);
   });
 
