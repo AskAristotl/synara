@@ -83,7 +83,7 @@ import {
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { buildFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
-import { buildClaudeProcessEnv } from "../claudeProcessEnv.ts";
+import { buildClaudeProcessEnv, resolveClaudeExecutablePath } from "../claudeProcessEnv.ts";
 import { sharedBrainMcpServers } from "../sharedBrainMcp.ts";
 import { positiveFiniteNumber } from "../tokenUsage.ts";
 import {
@@ -3324,12 +3324,33 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const claudeSubagents = buildClaudeSdkSubagents();
         const claudeSdkEnv = yield* resolveClaudeSdkEnv;
 
+        // A deleted workspace/worktree cwd makes spawn fail with ENOENT, which the SDK
+        // misreports as a Claude binary problem ("native binary not found" / "exists but
+        // failed to launch"). Validate up front so the user sees the real cause.
+        if (input.cwd) {
+          const cwdExists = yield* fileSystem
+            .exists(input.cwd)
+            .pipe(Effect.orElseSucceed(() => false));
+          if (!cwdExists) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: `Workspace directory '${input.cwd}' no longer exists. Recreate the worktree or start a new session in an existing directory.`,
+            });
+          }
+        }
+
         const queryOptions: ClaudeQueryOptions = {
           ...(input.cwd ? { cwd: input.cwd } : {}),
           // Keep Claude context-window selection model-driven so session start
           // and in-session switches both use the same API model contract.
           ...(apiModelId ? { model: apiModelId } : {}),
-          pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude",
+          // Resolve to an absolute path so a desktop/GUI launch with an un-hydrated PATH
+          // still finds the installed CLI instead of failing on the bare name "claude".
+          pathToClaudeCodeExecutable: resolveClaudeExecutablePath({
+            binaryPath: providerOptions?.binaryPath,
+            env: claudeSdkEnv,
+          }),
           settingSources: [...CLAUDE_SETTING_SOURCES],
           systemPrompt: {
             type: "preset",
@@ -3737,7 +3758,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         prompt: neverResolvingUserMessageStream(),
         options: {
           cwd,
-          pathToClaudeCodeExecutable: "claude",
+          pathToClaudeCodeExecutable: resolveClaudeExecutablePath({ env }),
           settingSources: [...CLAUDE_SETTING_SOURCES],
           permissionMode: "plan" as PermissionMode,
           persistSession: false,

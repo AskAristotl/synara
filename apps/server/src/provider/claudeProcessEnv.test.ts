@@ -10,6 +10,7 @@ import {
   hasUsableClaudeCliCredentialsContent,
   readClaudeCliCredentialsContentSummary,
   resolveClaudeCredentialsPaths,
+  resolveClaudeExecutablePath,
 } from "./claudeProcessEnv.ts";
 
 describe("claudeProcessEnv", () => {
@@ -144,6 +145,80 @@ describe("claudeProcessEnv", () => {
     );
     assert.equal(hasUsableClaudeCliCredentialsContent("{}", 1_000), false);
     assert.equal(hasUsableClaudeCliCredentialsContent("not json", 1_000), false);
+  });
+
+  it("honors an explicitly configured Claude binary path verbatim", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        binaryPath: "/custom/tools/claude",
+        platform: "darwin",
+        env: { PATH: "/usr/bin" },
+        homeDir: "/home/tester",
+        fileExists: () => false,
+      }),
+      "/custom/tools/claude",
+    );
+  });
+
+  it("resolves the first Claude on PATH in PATH order", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        platform: "linux",
+        env: { PATH: "/a/bin:/b/bin" },
+        homeDir: "/home/tester",
+        fileExists: (path) => path === "/a/bin/claude" || path === "/b/bin/claude",
+      }),
+      "/a/bin/claude",
+    );
+  });
+
+  it("falls back to ~/.local/bin when PATH omits the native install dir (desktop launch)", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        platform: "darwin",
+        // Minimal launchd PATH a GUI app inherits — no ~/.local/bin.
+        env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+        homeDir: "/home/tester",
+        fileExists: (path) => path === "/home/tester/.local/bin/claude",
+      }),
+      "/home/tester/.local/bin/claude",
+    );
+  });
+
+  it("falls back to the legacy ~/.claude/local install location", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        platform: "darwin",
+        env: { PATH: "/usr/bin" },
+        homeDir: "/home/tester",
+        fileExists: (path) => path === "/home/tester/.claude/local/claude",
+      }),
+      "/home/tester/.claude/local/claude",
+    );
+  });
+
+  it("returns the bare name as a last resort when no executable is found", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        platform: "linux",
+        env: { PATH: "/usr/bin" },
+        homeDir: "/home/tester",
+        fileExists: () => false,
+      }),
+      "claude",
+    );
+  });
+
+  it("leaves Windows resolution to the OS/PATHEXT (bare name)", () => {
+    assert.equal(
+      resolveClaudeExecutablePath({
+        platform: "win32",
+        env: { PATH: "C:\\bin" },
+        homeDir: "C:\\Users\\tester",
+        fileExists: () => true,
+      }),
+      "claude",
+    );
   });
 
   it("reads the first usable credentials path", () => {
