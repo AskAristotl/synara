@@ -84,6 +84,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { buildFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { buildClaudeProcessEnv, resolveClaudeExecutablePath } from "../claudeProcessEnv.ts";
+import { sharedBrainMcpServers } from "../sharedBrainMcp.ts";
 import { positiveFiniteNumber } from "../tokenUsage.ts";
 import {
   ProviderAdapterProcessError,
@@ -3371,17 +3372,23 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(Object.keys(settings).length > 0 ? { settings } : {}),
           ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
           ...(newSessionId ? { sessionId: newSessionId } : {}),
-          ...(input.subagentMcp
-            ? {
-                mcpServers: {
-                  synara: {
-                    type: "http",
-                    url: input.subagentMcp.url,
-                    headers: { Authorization: `Bearer ${input.subagentMcp.token}` },
-                  },
-                },
-              }
-            : {}),
+          ...(() => {
+            // Compose the per-session synara subagent MCP with the ONE shared
+            // gbrain brain (config-only via GBRAIN_MCP_URL; absent ⇒ omitted).
+            const mcpServers = {
+              ...(input.subagentMcp
+                ? {
+                    synara: {
+                      type: "http" as const,
+                      url: input.subagentMcp.url,
+                      headers: { Authorization: `Bearer ${input.subagentMcp.token}` },
+                    },
+                  }
+                : {}),
+              ...sharedBrainMcpServers(),
+            };
+            return Object.keys(mcpServers).length > 0 ? { mcpServers } : {};
+          })(),
           includePartialMessages: true,
           canUseTool,
           env: claudeSdkEnv,

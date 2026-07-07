@@ -26,6 +26,7 @@ import * as SqlitePersistence from "./persistence/Layers/Sqlite";
 import { makeServerProviderLayer, makeServerRuntimeServicesLayer } from "./serverLayers";
 import { startServerMemoryDiagnostics } from "./memoryDiagnostics";
 import { startClaudeCredentialKeepalive } from "./provider/claudeCredentialKeepalive";
+import { bootstrapGithubToken } from "./githubTokenBootstrap";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper";
@@ -316,6 +317,17 @@ const makeServerProgram = (input: CliInput) =>
     // Optional Claude OAuth keepalive. Disabled by default because it touches
     // Claude Code auth data in the background; users can opt in with
     // T3CODE_CLAUDE_KEEPALIVE=1.
+    // Resolve GH_TOKEN from the local gh CLI once at boot (sandboxed run
+    // processes can't unlock the keychain themselves). Non-fatal on failure;
+    // opt out with T3CODE_GH_TOKEN_BOOTSTRAP=0, pick the account with
+    // T3CODE_GH_USER.
+    yield* Effect.forkChild(
+      Effect.promise(() =>
+        bootstrapGithubToken({
+          log: (message) => Effect.runFork(Effect.logInfo(message)),
+        }),
+      ),
+    );
     yield* Effect.forkChild(
       Effect.gen(function* () {
         const settings = yield* serverSettings.getSettings;

@@ -95,6 +95,7 @@ function createProjectionStub(
     findSyntheticSubagentParentThread: unused,
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
+    getThreadDetailForExportById: unused,
   };
 }
 

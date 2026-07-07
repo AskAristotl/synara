@@ -37,6 +37,7 @@ import { threadArchiveChunks, threadArchiveFileName } from "./orchestration/expo
 import type { ServerReadiness } from "./server/readiness";
 import { resolveFavicon, tryParseHost } from "./siteFaviconCache";
 import { subAgentMcpRouteLayer } from "./subagentMcp/httpTransport.ts";
+import { taskApiRouteLayer } from "./taskApi/httpTransport.ts";
 import { isTrustedAppOrigin, normalizeCorsOrigin } from "./trustedOrigins";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
@@ -187,6 +188,7 @@ export function makeEffectHttpRouteLayer(readiness: ServerReadiness) {
     localImageEffectRouteLayer,
     attachmentsEffectRouteLayer,
     subAgentMcpRouteLayer,
+    taskApiRouteLayer,
     staticAndDevEffectRouteLayer,
   );
 }
