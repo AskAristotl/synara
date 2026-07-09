@@ -9,6 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { ComposerPickerMenuPopup } from "../ComposerPickerMenuPopup";
+import { DiffStatLabel } from "../DiffStatLabel";
 import { Menu, MenuItem, MenuTrigger } from "../../ui/menu";
 import { appendComposerPromptText } from "~/lib/chatReferences";
 import { gitPullRequestSnapshotQueryOptions, gitStatusQueryOptions } from "~/lib/gitReactQuery";
@@ -17,6 +18,7 @@ import {
   ChatBubbleIcon,
   CircleAlertIcon,
   CircleCheckIcon,
+  DiffIcon,
   GitPullRequestIcon,
   Loader2Icon,
   RefreshCwIcon,
@@ -33,10 +35,12 @@ import {
 } from "./EnvironmentRow";
 import {
   buildFixReviewCommentsPrompt,
+  buildResolveConflictsPrompt,
   describePullRequestComment,
   PULL_REQUEST_CHECK_STATUS_LABELS,
   summarizePullRequestChecks,
   summarizePullRequestComments,
+  summarizePullRequestDiffStat,
   withStableCheckKeys,
   type PullRequestChecksTone,
 } from "./environmentPullRequest.logic";
@@ -158,7 +162,12 @@ function CommentsMenuRow({
 }) {
   const display = describePullRequestComment(comment);
   return (
-    <MenuRow url={comment.url} onOpenUrl={onOpenUrl} className="flex flex-col gap-0.5 px-2 py-1.5">
+    // items-stretch overrides the menu-option default items-center for this column layout.
+    <MenuRow
+      url={comment.url}
+      onOpenUrl={onOpenUrl}
+      className="flex flex-col items-stretch gap-0.5 px-2 py-1.5"
+    >
       <span className="line-clamp-2 text-[length:var(--app-font-size-ui,12px)] text-[var(--color-text-foreground)]">
         {display.title}
       </span>
@@ -224,6 +233,8 @@ export function EnvironmentPullRequestSection({
   }
 
   const settledState = displayPr.state !== "open" ? displayPr.state : null;
+  const diffStat = summarizePullRequestDiffStat(displayPr);
+  const hasConflicts = settledState === null && displayPr.mergeability === "conflicting";
 
   const checks = snapshotQuery.data?.checks ?? [];
   const comments = snapshotQuery.data?.comments ?? [];
@@ -234,6 +245,7 @@ export function EnvironmentPullRequestSection({
   // Any failed refetch should be visible; otherwise stale rows look current.
   const failed = snapshotQuery.isError;
 
+  // Fix actions keep the PR context visible while the user reviews the generated draft.
   const handleFixComments = () => {
     if (!activeThreadId || comments.length === 0) {
       return;
@@ -247,20 +259,93 @@ export function EnvironmentPullRequestSection({
         commentsTruncated,
       }),
     );
-    onClose();
+  };
+
+  const handleResolveConflicts = () => {
+    if (!activeThreadId) {
+      return;
+    }
+    appendComposerPromptText(
+      activeThreadId,
+      buildResolveConflictsPrompt({
+        prNumber: displayPr.number,
+        prUrl: displayPr.url,
+        baseBranch: displayPr.baseBranch,
+        headBranch: displayPr.headBranch,
+      }),
+    );
   };
 
   return (
     <EnvironmentLabeledSection label="Pull request">
       <EnvironmentRow
         icon={<GitPullRequestIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
-        label={<span className="truncate">{`#${displayPr.number} ${displayPr.title}`}</span>}
+        label={
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate">{`#${displayPr.number} ${displayPr.title}`}</span>
+            {displayPr.isDraft ? (
+              <span className="shrink-0 rounded-full bg-[var(--color-background-elevated-secondary)] px-1.5 py-px text-[length:var(--app-font-size-ui-xs,10px)] text-muted-foreground">
+                Draft
+              </span>
+            ) : null}
+          </span>
+        }
         trailing={<ArrowUpRightIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
         onClick={() => {
           onOpenUrl(displayPr.url);
           onClose();
         }}
       />
+
+      {diffStat ? (
+        <EnvironmentRow
+          icon={<DiffIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
+          label={
+            <span className="flex min-w-0 items-center gap-1.5">
+              <DiffStatLabel additions={diffStat.additions} deletions={diffStat.deletions} />
+              {diffStat.filesLabel ? (
+                <span className="truncate text-muted-foreground">{diffStat.filesLabel}</span>
+              ) : null}
+            </span>
+          }
+          trailing={<ArrowUpRightIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
+          title="Open the PR file changes on GitHub"
+          onClick={() => {
+            onOpenUrl(`${displayPr.url}/files`);
+            onClose();
+          }}
+        />
+      ) : null}
+
+      {hasConflicts ? (
+        <div className="flex w-full items-center gap-1">
+          <EnvironmentRow
+            className="min-w-0 flex-1"
+            icon={
+              <CircleAlertIcon
+                className={cn(ENVIRONMENT_ROW_ICON_CLASS_NAME, "text-warning")}
+                aria-hidden
+              />
+            }
+            label={<span className="truncate">{`Conflicts with ${displayPr.baseBranch}`}</span>}
+            trailing={<ArrowUpRightIcon className={ENVIRONMENT_ROW_ICON_CLASS_NAME} aria-hidden />}
+            onClick={() => {
+              onOpenUrl(displayPr.url);
+              onClose();
+            }}
+          />
+          {activeThreadId ? (
+            <button
+              type="button"
+              onClick={handleResolveConflicts}
+              title="Drafts a prompt in the composer asking the agent to resolve the merge conflicts — review it, then send"
+              className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-[length:var(--app-font-size-ui,12px)] text-[var(--color-text-foreground)] transition-colors hover:bg-[var(--color-background-elevated-secondary)]"
+            >
+              Fix
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {settledState ? (
         <EnvironmentRow
@@ -345,11 +430,7 @@ export function EnvironmentPullRequestSection({
             </ComposerPickerMenuPopup>
           </Menu>
 
-          {/*
-        The whole row opens the comments popup; "Fix" is a sibling control (buttons cannot
-        nest), so the row grid mirrors ENVIRONMENT_ROW_CLASS_NAME with the trigger as the
-        flexible first cell.
-      */}
+          {/* The summary opens details; its sibling Fix drafts the entire visible batch. */}
           <div className="flex w-full items-center gap-1">
             <Menu>
               <MenuTrigger
@@ -385,7 +466,7 @@ export function EnvironmentPullRequestSection({
                     }
                   />
                 ) : (
-                  <div className="flex flex-col gap-0.5">
+                  <div className="flex max-h-64 flex-col gap-0.5 overflow-y-auto">
                     {comments.map((comment) => (
                       <CommentsMenuRow
                         key={comment.id}
@@ -407,7 +488,7 @@ export function EnvironmentPullRequestSection({
               <button
                 type="button"
                 onClick={handleFixComments}
-                title="Ask the agent to address these review comments"
+                title="Draft one prompt containing all visible review comments"
                 className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-[length:var(--app-font-size-ui,12px)] text-[var(--color-text-foreground)] transition-colors hover:bg-[var(--color-background-elevated-secondary)]"
               >
                 Fix

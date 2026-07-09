@@ -17,8 +17,10 @@ import type {
   OrchestrationThreadShell,
   CheckpointRef,
   ProjectId,
+  ProjectKind,
   ThreadId,
   ThreadEnvironmentMode,
+  TurnId,
 } from "@t3tools/contracts";
 import { ServiceMap } from "effect";
 import type { Effect, Option } from "effect";
@@ -37,15 +39,29 @@ export interface ProjectionSnapshotSequence {
 export interface ProjectionThreadCheckpointContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
+  readonly projectKind: ProjectKind;
   readonly workspaceRoot: string;
   readonly envMode: ThreadEnvironmentMode;
   readonly worktreePath: string | null;
   readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+  /** Completed file-change payloads, newest first, when explicitly requested by the caller. */
+  readonly fileChangeActivityPayloads?: ReadonlyArray<unknown>;
+}
+
+export interface ProjectionThreadCheckpointContextOptions {
+  /** Include the narrow activity payload set used to attribute files in non-Git workspaces. */
+  readonly includeFileChangeActivityPayloads?: boolean;
+}
+
+export interface ProjectionGeneratedImageActivityRecord {
+  readonly kind: string;
+  readonly payload: unknown;
 }
 
 export interface ProjectionFullThreadDiffContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
+  readonly projectKind: ProjectKind;
   readonly workspaceRoot: string;
   readonly envMode: ThreadEnvironmentMode;
   readonly worktreePath: string | null;
@@ -124,7 +140,21 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
+    options?: ProjectionThreadCheckpointContextOptions,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
+
+  /**
+   * Read the durable generated-image records for one turn. This narrow query is
+   * intentionally independent of the bounded thread-detail activity window so
+   * long turns and server restarts can still materialize transcript references.
+   */
+  readonly listGeneratedImageActivitiesByTurn: (
+    threadId: ThreadId,
+    turnId: TurnId,
+  ) => Effect.Effect<
+    ReadonlyArray<ProjectionGeneratedImageActivityRecord>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read the narrow context needed to diff a whole thread through one checkpoint.

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildSettingsBackAvailableThreadIds,
   buildProjectThreadTree,
   createSidebarThreadHoverAnchorId,
   derivePinnedProjectIdsForSidebar,
@@ -26,6 +25,7 @@ import {
   getVisibleThreadsForProject,
   getProjectSortTimestamp,
   hasUnseenCompletion,
+  partitionSidebarThreadsByProjectIds,
   isLatestPinnedThreadMutation,
   isLoopbackHostname,
   isDuplicateProjectCreateError,
@@ -33,6 +33,7 @@ import {
   recoverExistingAddProjectTarget,
   resolveSidebarThreadListPaging,
   resolveProjectEmptyState,
+  resolvePendingSidebarViewSelection,
   resolveSettingsBackTarget,
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadEnvMode,
@@ -68,6 +69,16 @@ function makeLatestTurn(overrides?: {
     completedAt: overrides?.completedAt ?? "2026-03-09T10:05:00.000Z",
   };
 }
+
+describe("resolvePendingSidebarViewSelection", () => {
+  it("optimistically follows a destination segment", () => {
+    expect(resolvePendingSidebarViewSelection("threads", "studio")).toBe("studio");
+  });
+
+  it("clears the optimistic segment when the user returns to the active view", () => {
+    expect(resolvePendingSidebarViewSelection("threads", "threads")).toBeNull();
+  });
+});
 
 describe("hasUnseenCompletion", () => {
   it("returns true when a thread completed after its last visit", () => {
@@ -221,14 +232,9 @@ describe("resolveSidebarNewThreadEnvMode", () => {
 
 describe("resolveSettingsBackTarget", () => {
   it("keeps fresh draft chats available as settings back targets", () => {
-    const availableThreadIds = buildSettingsBackAvailableThreadIds({
-      sidebarThreadSummaryById: {
-        "thread-latest": {},
-      },
-      draftThreadsByThreadId: {
-        "thread-draft": {},
-      },
-    });
+    // Mirrors the sidebar's settings-back wiring: persisted thread summaries plus the
+    // segment's draft thread ids form the restorable set.
+    const availableThreadIds = new Set(["thread-latest", "thread-draft"]);
 
     expect(
       resolveSettingsBackTarget({
@@ -1538,6 +1544,27 @@ function makeSidebarThreadSummary(
     ...overrides,
   };
 }
+
+describe("partitionSidebarThreadsByProjectIds", () => {
+  it("splits Studio threads from the regular Threads surface by project id", () => {
+    const projectThread = makeSidebarThreadSummary({
+      id: ThreadId.makeUnsafe("thread-project"),
+      projectId: ProjectId.makeUnsafe("project-app"),
+    });
+    const studioThread = makeSidebarThreadSummary({
+      id: ThreadId.makeUnsafe("thread-studio"),
+      projectId: ProjectId.makeUnsafe("project-studio"),
+    });
+
+    const partitioned = partitionSidebarThreadsByProjectIds(
+      [projectThread, studioThread],
+      new Set([ProjectId.makeUnsafe("project-studio")]),
+    );
+
+    expect(partitioned.nonStudioThreads.map((thread) => thread.id)).toEqual(["thread-project"]);
+    expect(partitioned.studioThreads.map((thread) => thread.id)).toEqual(["thread-studio"]);
+  });
+});
 
 describe("deriveSidebarProjectData", () => {
   it("keeps pinned threads in the total project thread count", () => {

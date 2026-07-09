@@ -27,9 +27,11 @@ interface WorkspacePage {
 interface WorkspaceStoreState {
   homeDir: string | null;
   chatWorkspaceRoot: string | null;
+  studioWorkspaceRoot: string | null;
   workspacePages: WorkspacePage[];
   setHomeDir: (homeDir: string | null | undefined) => void;
   setChatWorkspaceRoot: (chatWorkspaceRoot: string | null | undefined) => void;
+  setStudioWorkspaceRoot: (studioWorkspaceRoot: string | null | undefined) => void;
   setServerWorkspacePaths: (paths: ServerWorkspacePaths) => void;
   ensureWorkspacePage: (workspaceId: string) => void;
   createWorkspace: () => string;
@@ -143,6 +145,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
     (set) => ({
       homeDir: null,
       chatWorkspaceRoot: null,
+      studioWorkspaceRoot: null,
       workspacePages: [createWorkspacePage([])],
       setHomeDir: (homeDir) =>
         set((state) => {
@@ -168,6 +171,18 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
           }
           return { chatWorkspaceRoot: normalizedChatWorkspaceRoot };
         }),
+      setStudioWorkspaceRoot: (studioWorkspaceRoot) =>
+        set((state) => {
+          // `undefined` means server config has not arrived yet; keep the last known value.
+          if (studioWorkspaceRoot === undefined) {
+            return state;
+          }
+          const normalizedStudioWorkspaceRoot = studioWorkspaceRoot?.trim() ?? null;
+          if (state.studioWorkspaceRoot === normalizedStudioWorkspaceRoot) {
+            return state;
+          }
+          return { studioWorkspaceRoot: normalizedStudioWorkspaceRoot };
+        }),
       setServerWorkspacePaths: (paths) =>
         set((state) => {
           const normalizedPaths = normalizeServerWorkspacePaths(paths);
@@ -182,6 +197,12 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
             const normalizedChatWorkspaceRoot = normalizedPaths.chatWorkspaceRoot;
             if (state.chatWorkspaceRoot !== normalizedChatWorkspaceRoot) {
               next.chatWorkspaceRoot = normalizedChatWorkspaceRoot;
+            }
+          }
+          if (paths.studioWorkspaceRoot !== undefined) {
+            const normalizedStudioWorkspaceRoot = normalizedPaths.studioWorkspaceRoot;
+            if (state.studioWorkspaceRoot !== normalizedStudioWorkspaceRoot) {
+              next.studioWorkspaceRoot = normalizedStudioWorkspaceRoot;
             }
           }
           return Object.keys(next).length > 0 ? next : state;

@@ -129,6 +129,7 @@ function createProjectionStub(
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
     getThreadDetailForExportById: unused,
+    listGeneratedImageActivitiesByTurn: unused,
   };
 }
 
@@ -379,6 +380,7 @@ function createMidSeedProjectionStub(
     getThreadDetailById,
     getThreadDetailSnapshotById: unused,
     getThreadDetailForExportById: unused,
+    listGeneratedImageActivitiesByTurn: unused,
   };
 }
 

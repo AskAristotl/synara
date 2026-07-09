@@ -70,6 +70,9 @@ import Migration0051 from "./Migrations/051_AutomationBaseBranch.ts";
 // Upstream numbers this 050; renumbered 052 here so dev DBs that already
 // applied our 050/051 only run the one genuinely new migration.
 import Migration0052 from "./Migrations/052_ProfileStatsArchive.ts";
+// Upstream numbers these 051/052; renumbered 053/054 here for the same reason.
+import Migration0053 from "./Migrations/053_ProfileStatsDeletedTokensModel.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadUserMessageSummaryIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -134,6 +137,8 @@ export const migrationEntries = [
   [50, "ProjectionThreadsSubagentApproval", Migration0050],
   [51, "AutomationBaseBranch", Migration0051],
   [52, "ProfileStatsArchive", Migration0052],
+  [53, "ProfileStatsDeletedTokensModel", Migration0053],
+  [54, "ProjectionThreadUserMessageSummaryIndex", Migration0054],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
