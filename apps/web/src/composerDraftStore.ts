@@ -1535,6 +1535,33 @@ function normalizeModelSelection(
   return makeModelSelection(provider, model, options);
 }
 
+// ── Sticky selection sanitization ─────────────────────────────────────
+
+// The Claude context window must stay a per-thread choice: a 1M thread can grow far
+// beyond the normal 200k compaction point and consume usage limits much faster, so a
+// one-off pick must never silently become every future thread's sticky default.
+function stripNonStickyModelOptions(selection: ModelSelection): ModelSelection {
+  if (selection.provider !== "claudeAgent" || !selection.options?.contextWindow) {
+    return selection;
+  }
+  const { contextWindow: _contextWindow, ...rest } = selection.options;
+  return makeModelSelection(
+    selection.provider,
+    selection.model,
+    Object.keys(rest).length > 0 ? rest : undefined,
+  );
+}
+
+function sanitizeStickyModelSelectionMap(
+  map: Partial<Record<ProviderKind, ModelSelection>>,
+): Partial<Record<ProviderKind, ModelSelection>> {
+  const claude = map.claudeAgent;
+  if (claude?.provider !== "claudeAgent" || !claude.options?.contextWindow) {
+    return map;
+  }
+  return { ...map, claudeAgent: stripNonStickyModelOptions(claude) };
+}
+
 // ── Legacy sync helpers (used only during migration from v2 storage) ──
 
 function legacySyncModelSelectionOptions(
@@ -2795,7 +2822,7 @@ function normalizeCurrentPersistedComposerDraftStoreState(
     draftsByThreadId: normalizePersistedDraftsByThreadId(normalizedPersistedState.draftsByThreadId),
     draftThreadsByThreadId,
     projectDraftThreadIdByProjectId,
-    stickyModelSelectionByProvider,
+    stickyModelSelectionByProvider: sanitizeStickyModelSelectionMap(stickyModelSelectionByProvider),
     stickyActiveProvider,
   };
 }
@@ -3458,7 +3485,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         });
       },
       setStickyModelSelection: (modelSelection) => {
-        const normalized = normalizeModelSelection(modelSelection);
+        const rawNormalized = normalizeModelSelection(modelSelection);
+        const normalized = rawNormalized ? stripNonStickyModelOptions(rawNormalized) : null;
         set((state) => {
           if (!normalized) {
             return state;
@@ -3869,10 +3897,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
               return state;
             }
             if (providerOpts) {
-              nextStickyMap[normalizedProvider] = makeModelSelection(
-                normalizedProvider,
-                stickyBase.model,
-                providerOpts,
+              nextStickyMap[normalizedProvider] = stripNonStickyModelOptions(
+                makeModelSelection(normalizedProvider, stickyBase.model, providerOpts),
               );
             } else if (stickyBase.options) {
               nextStickyMap[normalizedProvider] = buildModelSelection(

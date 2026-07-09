@@ -102,6 +102,7 @@ import {
   reconcileDeletedThreadsFromClient,
 } from "../lib/deletedThreadClientReconciliation";
 import { persistAppStateNow, useStore } from "../store";
+import { flushSynaraStorageSnapshot } from "../storageKeyMigration";
 import { getThreadFromState, getThreadsFromState } from "../threadDerivation";
 import {
   resolveShortcutCommand,
@@ -224,6 +225,7 @@ import {
   getDesktopUpdateErrorSignature,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
+  shouldRecommendManualDesktopDownload,
   shouldShowArm64IntelBuildWarning,
   shouldShowDesktopUpdateButton,
   shouldToastDesktopUpdateActionResult,
@@ -6235,6 +6237,7 @@ export default function Sidebar() {
       }
       lastDesktopUpdateErrorToastSignatureRef.current = signature;
       const releaseUrl = input.state?.releaseUrl ?? null;
+      const recommendManualDownload = shouldRecommendManualDesktopDownload(input.state);
       const fallbackProps = releaseUrl
         ? {
             data: { copyText: releaseUrl },
@@ -6248,8 +6251,10 @@ export default function Sidebar() {
         : {};
       toastManager.add({
         type: "error",
-        title: input.title,
-        description: input.description,
+        title: recommendManualDownload ? "Download the update manually" : input.title,
+        description: recommendManualDownload
+          ? `Automatic installation has failed ${input.state?.installFailureCount ?? 0} times. Download ${input.state?.availableVersion ?? "the update"} manually to finish updating.`
+          : input.description,
         ...fallbackProps,
       });
     },
@@ -6518,8 +6523,8 @@ export default function Sidebar() {
     if (desktopUpdateButtonAction === "install") {
       setInstallingDesktopUpdate(true);
       persistAppStateNow();
-      void bridge
-        .installUpdate()
+      void flushSynaraStorageSnapshot()
+        .then(() => bridge.installUpdate())
         .then((result) => {
           setDesktopUpdateState(result.state);
           setInstallingDesktopUpdate(false);

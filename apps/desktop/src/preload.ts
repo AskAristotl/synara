@@ -7,6 +7,7 @@ import {
   resolveDesktopWsUrlFromEnv,
 } from "./desktopWsBridge";
 import { SERVER_TRANSCRIBE_VOICE_CHANNEL } from "./voiceTranscription";
+import { STORAGE_MIGRATION_IPC_CHANNELS } from "./desktopStorageMigration";
 
 const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
 const SAVE_FILE_CHANNEL = "desktop:save-file";
@@ -126,6 +127,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     get: (key) => ipcRenderer.invoke(SECURE_CREDENTIAL_GET_CHANNEL, key),
     set: (key, value) => ipcRenderer.invoke(SECURE_CREDENTIAL_SET_CHANNEL, key, value),
     delete: (key) => ipcRenderer.invoke(SECURE_CREDENTIAL_DELETE_CHANNEL, key),
+  },
+  storageMigration: {
+    saveSnapshot: (snapshot) => ipcRenderer.invoke(STORAGE_MIGRATION_IPC_CHANNELS.save, snapshot),
+    readSnapshot: () => ipcRenderer.sendSync(STORAGE_MIGRATION_IPC_CHANNELS.read),
+    acknowledgeSnapshot: () => ipcRenderer.invoke(STORAGE_MIGRATION_IPC_CHANNELS.acknowledge),
   },
   server: {
     transcribeVoice: (input) => ipcRenderer.invoke(SERVER_TRANSCRIBE_VOICE_CHANNEL, input),
