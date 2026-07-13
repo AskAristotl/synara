@@ -53,9 +53,9 @@ import {
   CommandId,
   type OrchestrationEvent,
   type ProviderApprovalDecision,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Cause, Effect, Layer, Option, Stream } from "effect";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker } from "@synara/shared/DrainableWorker";
 
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";

@@ -6,8 +6,8 @@
 //   (shared nickname/role/accent-color resolution — see also MessagesTimeline's inline
 //   subagent rows, which this block's visual language mirrors).
 
-import { PROVIDER_DISPLAY_NAMES, type ProviderKind, type ThreadId } from "@t3tools/contracts";
-import { formatModelDisplayName } from "@t3tools/shared/model";
+import { PROVIDER_DISPLAY_NAMES, type ProviderKind, type ThreadId } from "@synara/contracts";
+import { formatModelDisplayName } from "@synara/shared/model";
 import { useMemo } from "react";
 
 import { resolveSubagentPresentation } from "~/lib/subagentPresentation";

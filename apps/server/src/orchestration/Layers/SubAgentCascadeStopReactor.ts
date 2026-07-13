@@ -40,9 +40,9 @@
  *
  * @module SubAgentCascadeStopReactorLive
  */
-import type { OrchestrationEvent } from "@t3tools/contracts";
+import type { OrchestrationEvent } from "@synara/contracts";
 import { Cause, Effect, Layer, Stream } from "effect";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker } from "@synara/shared/DrainableWorker";
 
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { SubAgentOrchestrator } from "../Services/SubAgentOrchestrator.ts";

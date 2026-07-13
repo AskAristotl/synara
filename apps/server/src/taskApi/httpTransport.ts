@@ -57,7 +57,7 @@ import {
   type AutomationRun,
   type OrchestrationCommand,
   type ThreadId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 

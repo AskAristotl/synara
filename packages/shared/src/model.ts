@@ -11,6 +11,7 @@ import {
   type GeminiModelOptions,
   type GeminiThinkingBudget,
   type GeminiThinkingLevel,
+  type DroidModelOptions,
   type GrokModelOptions,
   type GrokReasoningEffort,
   type ModelCapabilities,
@@ -24,7 +25,7 @@ import {
   type ProviderKind,
   type ProviderWithDefaultModel,
   CodexReasoningEffort,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 
 const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> = {
   claudeAgent: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeAgent.map((option) => option.slug)),
@@ -32,6 +33,7 @@ const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> =
   cursor: new Set(MODEL_OPTIONS_BY_PROVIDER.cursor.map((option) => option.slug)),
   gemini: new Set(MODEL_OPTIONS_BY_PROVIDER.gemini.map((option) => option.slug)),
   grok: new Set(MODEL_OPTIONS_BY_PROVIDER.grok.map((option) => option.slug)),
+  droid: new Set(MODEL_OPTIONS_BY_PROVIDER.droid.map((option) => option.slug)),
   kilo: new Set(MODEL_OPTIONS_BY_PROVIDER.kilo.map((option) => option.slug)),
   opencode: new Set(MODEL_OPTIONS_BY_PROVIDER.opencode.map((option) => option.slug)),
   pi: new Set<ModelSlug>(),
@@ -284,6 +286,16 @@ export function getDefaultContextWindow(caps: ModelCapabilities): string | null 
   return caps.contextWindowOptions.find((option) => option.isDefault)?.value ?? null;
 }
 
+/** Check whether a Claude auto-compaction budget is supported. */
+export function hasAutoCompactWindowOption(caps: ModelCapabilities, value: string): boolean {
+  return caps.autoCompactWindowOptions?.some((option) => option.value === value) ?? false;
+}
+
+/** Return the default Claude auto-compaction budget, or null if the model has no override. */
+export function getDefaultAutoCompactWindow(caps: ModelCapabilities): string | null {
+  return caps.autoCompactWindowOptions?.find((option) => option.isDefault)?.value ?? null;
+}
+
 export function resolveLabeledOptionValue(
   options: ReadonlyArray<{ value: string; isDefault?: boolean | undefined }> | undefined,
   rawValue: string | null | undefined,
@@ -477,6 +489,20 @@ function legacyCapabilityDescriptors(
         ...(option.isDefault ? { isDefault: true as const } : {}),
       })),
       ...(defaultContextWindowOption ? { currentValue: defaultContextWindowOption.value } : {}),
+    });
+  }
+  if (caps.autoCompactWindowOptions && caps.autoCompactWindowOptions.length > 0) {
+    const defaultOption = caps.autoCompactWindowOptions.find((option) => option.isDefault);
+    descriptors.push({
+      id: "autoCompactWindow",
+      label: "Auto-compact",
+      type: "select",
+      options: caps.autoCompactWindowOptions.map((option) => ({
+        id: option.value,
+        label: option.label,
+        ...(option.isDefault ? { isDefault: true as const } : {}),
+      })),
+      ...(defaultOption ? { currentValue: defaultOption.value } : {}),
     });
   }
   if (caps.supportsFastMode) {
@@ -673,9 +699,10 @@ export function normalizeClaudeModelOptions(
 ): ClaudeModelOptions | undefined {
   const caps = getModelCapabilities("claudeAgent", model);
   const defaultReasoningEffort = getDefaultEffort(caps);
-  const defaultContextWindow = getDefaultContextWindow(caps);
+  const defaultAutoCompactWindow = getDefaultAutoCompactWindow(caps);
   const resolvedEffort = trimOrNull(modelOptions?.effort);
-  const resolvedContextWindow = trimOrNull(modelOptions?.contextWindow);
+  const resolvedAutoCompactWindow =
+    trimOrNull(modelOptions?.autoCompactWindow) ?? trimOrNull(modelOptions?.contextWindow);
   const isPromptInjected = caps.promptInjectedEffortLevels.includes(resolvedEffort ?? "");
   const effort =
     resolvedEffort &&
@@ -684,11 +711,11 @@ export function normalizeClaudeModelOptions(
     resolvedEffort !== defaultReasoningEffort
       ? resolvedEffort
       : undefined;
-  const contextWindow =
-    resolvedContextWindow &&
-    hasContextWindowOption(caps, resolvedContextWindow) &&
-    resolvedContextWindow !== defaultContextWindow
-      ? resolvedContextWindow
+  const autoCompactWindow =
+    resolvedAutoCompactWindow &&
+    hasAutoCompactWindowOption(caps, resolvedAutoCompactWindow) &&
+    resolvedAutoCompactWindow !== defaultAutoCompactWindow
+      ? resolvedAutoCompactWindow
       : undefined;
   const thinking =
     caps.supportsThinkingToggle && modelOptions?.thinking === false ? false : undefined;
@@ -697,22 +724,13 @@ export function normalizeClaudeModelOptions(
     ...(thinking === false ? { thinking: false } : {}),
     ...(effort ? { effort } : {}),
     ...(fastMode ? { fastMode: true } : {}),
-    ...(contextWindow ? { contextWindow } : {}),
+    ...(autoCompactWindow ? { autoCompactWindow } : {}),
   };
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }
 
 export function resolveApiModelId(modelSelection: ModelSelection): string {
-  switch (modelSelection.provider) {
-    case "claudeAgent": {
-      const caps = getModelCapabilities(modelSelection.provider, modelSelection.model);
-      return modelSelection.options?.contextWindow === "1m" && hasContextWindowOption(caps, "1m")
-        ? `${modelSelection.model}[1m]`
-        : modelSelection.model;
-    }
-    default:
-      return modelSelection.model;
-  }
+  return modelSelection.model;
 }
 
 /**
@@ -788,8 +806,8 @@ function claudeSpawnProfile(selection: Extract<ModelSelection, { provider: "clau
  * Whether switching from `previous` to `next` requires restarting the Claude
  * subprocess. Restarting resumes via `--resume`, which replays the whole
  * conversation as uncached input tokens, so it must only happen for options
- * fixed at spawn (effort/settings). Model and context-window changes flow
- * through the in-session `setModel` path instead.
+ * fixed at spawn (effort/settings). Model changes use `setModel`, while the
+ * auto-compact budget uses the SDK's live flag-settings control.
  */
 export function claudeSelectionRequiresRestart(
   previous: ModelSelection | undefined,
@@ -862,6 +880,14 @@ export function normalizeGrokModelOptions(
     return undefined;
   }
   return { reasoningEffort: reasoningEffort as GrokReasoningEffort };
+}
+
+export function normalizeDroidModelOptions(
+  _model: string | null | undefined,
+  modelOptions: DroidModelOptions | null | undefined,
+): DroidModelOptions | undefined {
+  const reasoningEffort = trimOrNull(modelOptions?.reasoningEffort);
+  return reasoningEffort ? { reasoningEffort } : undefined;
 }
 
 export function normalizePiModelOptions(

@@ -5,7 +5,7 @@
 // Exports: SUBAGENT_MAX_LIVE_PER_ROOT, SUBAGENT_WAIT_MAX_SECONDS,
 // SUBAGENT_DIFF_SETTLE_SECONDS, clampWaitSeconds, isTerminalStatus
 
-import type { SubAgentStatus } from "@t3tools/contracts";
+import type { SubAgentStatus } from "@synara/contracts";
 
 // Maximum number of concurrently-running sub-agents per root session.
 export const SUBAGENT_MAX_LIVE_PER_ROOT = 6;

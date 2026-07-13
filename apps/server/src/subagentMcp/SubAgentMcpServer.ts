@@ -42,7 +42,7 @@
  *
  * @module SubAgentMcpServer
  */
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationThread } from "@synara/contracts";
 import {
   ProviderKind,
   SubAgentApprovalMode,
@@ -52,8 +52,8 @@ import {
   SubAgentWaitInput,
   SubAgentWorkspaceMode,
   SubAgentWaitMode,
-} from "@t3tools/contracts";
-import { SUBAGENT_WAIT_MAX_SECONDS } from "@t3tools/shared/subagent";
+} from "@synara/contracts";
+import { SUBAGENT_WAIT_MAX_SECONDS } from "@synara/shared/subagent";
 import { Effect, Layer, Option, Result, Schema, SchemaIssue, ServiceMap } from "effect";
 
 import {

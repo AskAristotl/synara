@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, ProjectId } from "@t3tools/contracts";
+import { CommandId, ProjectId } from "@synara/contracts";
 import { Effect, Layer, ManagedRuntime } from "effect";
 
 import { ServerConfig } from "../src/config.ts";

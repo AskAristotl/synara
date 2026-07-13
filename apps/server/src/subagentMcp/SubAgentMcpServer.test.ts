@@ -9,7 +9,7 @@ import {
   type SubAgentStopInput,
   type SubAgentWaitInput,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Effect, Layer, Option, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 

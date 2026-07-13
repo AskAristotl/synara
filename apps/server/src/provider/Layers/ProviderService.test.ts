@@ -1,3 +1,8 @@
+// FILE: ProviderService.test.ts
+// Purpose: Verifies cross-provider routing, persistence, recovery, and runtime lifecycle behavior.
+// Layer: Provider service integration tests
+// Depends on: ProviderServiceLive with in-memory adapter and SQLite fakes.
+
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +13,7 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderTurnStartResult,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import {
   ApprovalRequestId,
   EventId,
@@ -16,7 +21,7 @@ import {
   ProviderSessionStartInput,
   ThreadId,
   TurnId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { it, assert, vi } from "@effect/vitest";
 import { assertFailure } from "@effect/vitest/utils";
 
@@ -89,7 +94,10 @@ function requireReleaseListSessions(release: ReleaseListSessions | undefined): R
   return release;
 }
 
-function makeFakeCodexAdapter(provider: ProviderKind = "codex") {
+function makeFakeCodexAdapter(
+  provider: ProviderKind = "codex",
+  options?: { readonly conversationRollback?: "native" | "restart-session" },
+) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -210,6 +218,9 @@ function makeFakeCodexAdapter(provider: ProviderKind = "codex") {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      ...(options?.conversationRollback
+        ? { conversationRollback: options.conversationRollback }
+        : {}),
     },
     startSession,
     sendTurn,
@@ -306,17 +317,28 @@ const waitUntilEffect = <E = never, R = never>(
     }
   });
 
-function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServiceLive>[0]) {
+function makeProviderServiceLayer(
+  options?: Parameters<typeof makeProviderServiceLive>[0],
+  providers?: { readonly includeRestartRollbackDroid?: boolean },
+) {
   const codex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter("claudeAgent");
+  const droid = makeFakeCodexAdapter("droid", { conversationRollback: "restart-session" });
   const registry: typeof ProviderAdapterRegistry.Service = {
     getByProvider: (provider) =>
       provider === "codex"
         ? Effect.succeed(codex.adapter)
         : provider === "claudeAgent"
           ? Effect.succeed(claude.adapter)
-          : Effect.fail(new ProviderUnsupportedError({ provider })),
-    listProviders: () => Effect.succeed(["codex", "claudeAgent"]),
+          : provider === "droid" && providers?.includeRestartRollbackDroid === true
+            ? Effect.succeed(droid.adapter)
+            : Effect.fail(new ProviderUnsupportedError({ provider })),
+    listProviders: () =>
+      Effect.succeed(
+        providers?.includeRestartRollbackDroid === true
+          ? (["codex", "claudeAgent", "droid"] as const)
+          : (["codex", "claudeAgent"] as const),
+      ),
   };
 
   const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
@@ -353,14 +375,18 @@ function makeProviderServiceLayer(options?: Parameters<typeof makeProviderServic
   return {
     codex,
     claude,
+    droid,
     layer,
   };
 }
 
 const routing = makeProviderServiceLayer();
+const restartRollbackRouting = makeProviderServiceLayer(undefined, {
+  includeRestartRollbackDroid: true,
+});
 it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", () =>
   Effect.gen(function* () {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-"));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-service-"));
     const dbPath = path.join(tempDir, "orchestration.sqlite");
 
     const codex = makeFakeCodexAdapter();
@@ -427,7 +453,7 @@ it.effect(
   "ProviderServiceLive persists active sessions as stopped before adapter cleanup runs",
   () =>
     Effect.gen(function* () {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-stopall-"));
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-service-stopall-"));
       const dbPath = path.join(tempDir, "orchestration.sqlite");
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -504,7 +530,7 @@ it.effect(
   "ProviderServiceLive restores rollback routing after restart using persisted thread mapping",
   () =>
     Effect.gen(function* () {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-restart-"));
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-service-restart-"));
       const dbPath = path.join(tempDir, "orchestration.sqlite");
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -1264,6 +1290,77 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("persists task-list resume state before the active turn completes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntimeRepository;
+
+      const session = yield* provider.startSession(asThreadId("thread-task-resume-refresh"), {
+        provider: "claudeAgent",
+        threadId: asThreadId("thread-task-resume-refresh"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "continue the work",
+        attachments: [],
+      });
+      const updatedResumeCursor = {
+        threadId: session.threadId,
+        resume: "550e8400-e29b-41d4-a716-446655440000",
+        turnCount: 1,
+        trackedTasks: [
+          {
+            id: "task-1",
+            subject: "Patch UI",
+            status: "in_progress",
+            blockedBy: [],
+          },
+        ],
+      };
+
+      routing.claude.updateSession(session.threadId, (existing) => ({
+        ...existing,
+        resumeCursor: updatedResumeCursor,
+      }));
+      routing.claude.emit({
+        type: "turn.tasks.updated",
+        eventId: asEventId("runtime-task-resume-refresh"),
+        provider: "claudeAgent",
+        createdAt: "2026-02-27T00:04:30.000Z",
+        threadId: session.threadId,
+        turnId: turn.turnId,
+        payload: {
+          tasks: [{ task: "Patching UI", status: "inProgress" }],
+        },
+      });
+
+      yield* waitUntilEffect(
+        () =>
+          runtimeRepository.getByThreadId({ threadId: session.threadId }).pipe(
+            Effect.map(
+              Option.exists((runtime) => {
+                const cursor = runtime.resumeCursor;
+                return cursor !== null && typeof cursor === "object" && "trackedTasks" in cursor;
+              }),
+            ),
+          ),
+        500,
+        20,
+        "task resume cursor persistence",
+      );
+
+      const runtime = yield* runtimeRepository.getByThreadId({
+        threadId: session.threadId,
+      });
+      assert.equal(Option.isSome(runtime), true);
+      if (Option.isSome(runtime)) {
+        assert.deepEqual(runtime.value.resumeCursor, updatedResumeCursor);
+        assert.equal(runtime.value.status, "running");
+      }
+    }),
+  );
+
   it.effect("marks persisted runtime bindings errored on runtime errors", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1400,7 +1497,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
   it.effect("reuses persisted resume cursor when startSession is called after a restart", () =>
     Effect.gen(function* () {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-start-"));
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-service-start-"));
       const dbPath = path.join(tempDir, "orchestration.sqlite");
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -1492,7 +1589,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
   it.effect("clears stale resume cursor while preserving provider options for fresh restart", () =>
     Effect.gen(function* () {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-clear-"));
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-service-clear-"));
       const dbPath = path.join(tempDir, "orchestration.sqlite");
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -1585,7 +1682,9 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
   it.effect("stops the live runtime while preserving resume cursor and provider options", () =>
     Effect.gen(function* () {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-provider-service-stop-runtime-"));
+      const tempDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "synara-provider-service-stop-runtime-"),
+      );
       const dbPath = path.join(tempDir, "orchestration.sqlite");
       const persistenceLayer = makeSqlitePersistenceLive(dbPath);
       const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -1676,6 +1775,33 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       fs.rmSync(tempDir, { recursive: true, force: true });
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+restartRollbackRouting.layer("ProviderServiceLive restart-based rollback", (it) => {
+  it.effect("clears Droid's native cursor instead of reporting a fake rewind", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-droid-restart-rollback");
+      const session = yield* provider.startSession(threadId, {
+        provider: "droid",
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      yield* provider.rollbackConversation({ threadId, numTurns: 1 });
+
+      assert.equal(restartRollbackRouting.droid.rollbackThread.mock.calls.length, 0);
+      assert.deepEqual(restartRollbackRouting.droid.stopSession.mock.calls, [[session.threadId]]);
+      const binding = yield* directory.getBinding(threadId);
+      assert.equal(Option.isSome(binding), true);
+      if (Option.isSome(binding)) {
+        assert.equal(binding.value.status, "stopped");
+        assert.equal(binding.value.resumeCursor, null);
+      }
+    }),
   );
 });
 

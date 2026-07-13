@@ -29,7 +29,7 @@ import type {
   RuntimeMode,
   SubAgentApprovalMode,
   ThreadEnvironmentMode,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
@@ -140,6 +140,7 @@ export interface TurnDiffSummary {
   checkpointRef?: CheckpointRef | undefined;
   assistantMessageId?: MessageId | undefined;
   checkpointTurnCount?: number | undefined;
+  checkpointTurnCounts?: number[] | undefined;
 }
 
 // Ephemeral client-side progress of the "New worktree" first-send setup

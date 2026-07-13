@@ -9,7 +9,7 @@ import {
   type ProviderApprovalDecision,
   ProjectId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Exit, Layer, ManagedRuntime, Scope, Stream } from "effect";
 import { describe, expect, it } from "vitest";

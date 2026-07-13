@@ -4,7 +4,7 @@
 //          .test.tsx suite runs under vitest's default "node" environment — see MessagesTimeline
 //          .test.tsx and ChatTranscriptPane.test.tsx for the same renderToStaticMarkup convention).
 
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { ProjectId, ThreadId } from "@synara/contracts";
 import type { ReactElement, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";

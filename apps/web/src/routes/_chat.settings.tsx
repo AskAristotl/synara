@@ -9,11 +9,11 @@ import {
   type ServerProviderStatus,
   type ThreadId,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
-import { pluralize } from "@t3tools/shared/text";
+import { getModelOptions, normalizeModelSlug } from "@synara/shared/model";
+import { pluralize } from "@synara/shared/text";
 import {
   type ReactNode,
   type RefObject,
@@ -41,6 +41,7 @@ import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { CSS } from "@dnd-kit/utilities";
 import {
   type AppSettings,
+  CUSTOM_MODEL_EDITOR_PROVIDER_SETTINGS,
   DEFAULT_UI_DENSITY,
   type UiDensity,
   MAX_CHAT_FONT_SIZE_PX,
@@ -50,7 +51,6 @@ import {
   MAX_CUSTOM_MODEL_LENGTH,
   MIN_CHAT_FONT_SIZE_PX,
   MIN_TERMINAL_FONT_SIZE_PX,
-  MODEL_PROVIDER_SETTINGS,
   normalizeChatFontSizePx,
   normalizeTerminalFontFamily,
   normalizeTerminalFontSizePx,
@@ -222,6 +222,7 @@ const PROVIDER_SELECT_OPTIONS = [
   "cursor",
   "gemini",
   "grok",
+  "droid",
   "opencode",
   "kilo",
   "pi",
@@ -250,6 +251,7 @@ type InstallBinarySettingsKey =
   | "cursorBinaryPath"
   | "geminiBinaryPath"
   | "grokBinaryPath"
+  | "droidBinaryPath"
   | "kiloBinaryPath"
   | "openCodeBinaryPath"
   | "piBinaryPath";
@@ -288,6 +290,7 @@ const PROVIDER_VISIBILITY_OPTIONS: ReadonlyArray<{ provider: ProviderKind; title
   { provider: "cursor", title: PROVIDER_DISPLAY_NAMES.cursor },
   { provider: "gemini", title: PROVIDER_DISPLAY_NAMES.gemini },
   { provider: "grok", title: PROVIDER_DISPLAY_NAMES.grok },
+  { provider: "droid", title: PROVIDER_DISPLAY_NAMES.droid },
   { provider: "kilo", title: PROVIDER_DISPLAY_NAMES.kilo },
   { provider: "opencode", title: PROVIDER_DISPLAY_NAMES.opencode },
   { provider: "pi", title: PROVIDER_DISPLAY_NAMES.pi },
@@ -444,6 +447,23 @@ const INSTALL_PROVIDER_SETTINGS: readonly InstallProviderSettings[] = [
     binaryDescription: (
       <>
         Leave blank to use <code>grok</code> from your PATH.
+      </>
+    ),
+  },
+  {
+    provider: "droid",
+    title: "Droid",
+    docs: [
+      {
+        label: "Quickstart",
+        href: "https://docs.factory.ai/cli/getting-started/quickstart.md",
+      },
+    ],
+    binaryPathKey: "droidBinaryPath",
+    binaryPlaceholder: "droid",
+    binaryDescription: (
+      <>
+        Leave blank to use <code>droid</code> from your PATH.
       </>
     ),
   },
@@ -677,6 +697,7 @@ function SettingsRouteView() {
     cursor: Boolean(settings.cursorBinaryPath || settings.cursorApiEndpoint),
     gemini: Boolean(settings.geminiBinaryPath),
     grok: Boolean(settings.grokBinaryPath),
+    droid: Boolean(settings.droidBinaryPath),
     kilo: Boolean(settings.kiloBinaryPath || settings.kiloServerUrl || settings.kiloServerPassword),
     opencode: Boolean(
       settings.openCodeBinaryPath ||
@@ -699,6 +720,7 @@ function SettingsRouteView() {
     cursor: "",
     gemini: "",
     grok: "",
+    droid: "",
     kilo: "",
     opencode: "",
     pi: "",
@@ -753,6 +775,7 @@ function SettingsRouteView() {
   const cursorApiEndpoint = settings.cursorApiEndpoint;
   const geminiBinaryPath = settings.geminiBinaryPath;
   const grokBinaryPath = settings.grokBinaryPath;
+  const droidBinaryPath = settings.droidBinaryPath;
   const kiloBinaryPath = settings.kiloBinaryPath;
   const kiloServerUrl = settings.kiloServerUrl;
   const kiloServerPassword = settings.kiloServerPassword;
@@ -919,23 +942,14 @@ function SettingsRouteView() {
         option.provider === currentGitTextGenerationProvider &&
         option.slug === currentGitTextGenerationModel,
     )?.name ?? currentGitTextGenerationModel;
-  const selectedCustomModelProviderSettings = MODEL_PROVIDER_SETTINGS.find(
+  const selectedCustomModelProviderSettings = CUSTOM_MODEL_EDITOR_PROVIDER_SETTINGS.find(
     (providerSettings) => providerSettings.provider === selectedCustomModelProvider,
   )!;
   const selectedCustomModelInput = customModelInputByProvider[selectedCustomModelProvider];
   const selectedCustomModelError = customModelErrorByProvider[selectedCustomModelProvider] ?? null;
-  const totalCustomModels =
-    settings.customCodexModels.length +
-    settings.customClaudeModels.length +
-    settings.customCursorModels.length +
-    settings.customGeminiModels.length +
-    settings.customGrokModels.length +
-    settings.customKiloModels.length +
-    settings.customOpenCodeModels.length +
-    settings.customPiModels.length;
   const savedCustomModelRows = useMemo(
     () =>
-      MODEL_PROVIDER_SETTINGS.flatMap((providerSettings) =>
+      CUSTOM_MODEL_EDITOR_PROVIDER_SETTINGS.flatMap((providerSettings) =>
         getCustomModelsForProvider(settings, providerSettings.provider).map((slug) => ({
           key: `${providerSettings.provider}:${slug}`,
           provider: providerSettings.provider,
@@ -954,6 +968,7 @@ function SettingsRouteView() {
     settings.cursorApiEndpoint !== defaults.cursorApiEndpoint ||
     settings.geminiBinaryPath !== defaults.geminiBinaryPath ||
     settings.grokBinaryPath !== defaults.grokBinaryPath ||
+    settings.droidBinaryPath !== defaults.droidBinaryPath ||
     settings.kiloBinaryPath !== defaults.kiloBinaryPath ||
     settings.kiloServerUrl !== defaults.kiloServerUrl ||
     settings.kiloServerPassword !== defaults.kiloServerPassword ||
@@ -1019,6 +1034,7 @@ function SettingsRouteView() {
     settings.customCursorModels.length > 0 ||
     settings.customGeminiModels.length > 0 ||
     settings.customGrokModels.length > 0 ||
+    settings.customDroidModels.length > 0 ||
     settings.customKiloModels.length > 0 ||
     settings.customOpenCodeModels.length > 0 ||
     settings.customPiModels.length > 0
@@ -1205,6 +1221,7 @@ function SettingsRouteView() {
       cursor: false,
       gemini: false,
       grok: false,
+      droid: false,
       kilo: false,
       opencode: false,
       pi: false,
@@ -1216,6 +1233,7 @@ function SettingsRouteView() {
       cursor: "",
       gemini: "",
       grok: "",
+      droid: "",
       kilo: "",
       opencode: "",
       pi: "",
@@ -1715,6 +1733,15 @@ function SettingsRouteView() {
 
       <div ref={environmentPanelRef} id={SETTINGS_TARGETS.environmentPanel}>
         <SettingsSection title="Environment panel">
+          {renderBooleanSettingRow({
+            settingKey: "environmentPanelDefaultOpen",
+            title: "Open by default",
+            description:
+              "Open the chat Environment panel automatically on normal threads. When off, the panel stays closed until you open it. Your last open/close also updates this preference.",
+            resetLabel: "environment panel default open",
+            ariaLabel: "Open the Environment panel by default on normal threads",
+          })}
+
           {renderBooleanSettingRow({
             settingKey: "showEnvironmentUsage",
             title: "Usage",
@@ -2444,7 +2471,7 @@ function SettingsRouteView() {
           title="Saved model slugs"
           description="Add custom model slugs for supported providers."
           resetAction={
-            totalCustomModels > 0 ? (
+            savedCustomModelRows.length > 0 ? (
               <SettingResetButton
                 label="custom models"
                 onClick={() => {
@@ -2476,6 +2503,7 @@ function SettingsRouteView() {
                     value !== "cursor" &&
                     value !== "gemini" &&
                     value !== "grok" &&
+                    value !== "droid" &&
                     value !== "kilo" &&
                     value !== "opencode" &&
                     value !== "pi"
@@ -2493,7 +2521,7 @@ function SettingsRouteView() {
                   <SelectValue>{selectedCustomModelProviderSettings.title}</SelectValue>
                 </SelectTrigger>
                 <SettingsSelectPopup align="start">
-                  {MODEL_PROVIDER_SETTINGS.map((providerSettings) => (
+                  {CUSTOM_MODEL_EDITOR_PROVIDER_SETTINGS.map((providerSettings) => (
                     <SelectItem
                       hideIndicator
                       key={providerSettings.provider}
@@ -2544,7 +2572,7 @@ function SettingsRouteView() {
               <p className="mt-2 text-xs text-destructive">{selectedCustomModelError}</p>
             ) : null}
 
-            {totalCustomModels > 0 ? (
+            {savedCustomModelRows.length > 0 ? (
               <div className={cn("mt-3", SETTINGS_INSET_LIST_CLASS_NAME)}>
                 {visibleCustomModelRows.map((row) => (
                   <div
@@ -2757,6 +2785,7 @@ function SettingsRouteView() {
                     cursorApiEndpoint: defaults.cursorApiEndpoint,
                     geminiBinaryPath: defaults.geminiBinaryPath,
                     grokBinaryPath: defaults.grokBinaryPath,
+                    droidBinaryPath: defaults.droidBinaryPath,
                     kiloBinaryPath: defaults.kiloBinaryPath,
                     kiloServerUrl: defaults.kiloServerUrl,
                     kiloServerPassword: defaults.kiloServerPassword,
@@ -2773,6 +2802,7 @@ function SettingsRouteView() {
                     cursor: false,
                     gemini: false,
                     grok: false,
+                    droid: false,
                     kilo: false,
                     opencode: false,
                     pi: false,
@@ -2799,19 +2829,21 @@ function SettingsRouteView() {
                           ? settings.geminiBinaryPath !== defaults.geminiBinaryPath
                           : providerSettings.provider === "grok"
                             ? settings.grokBinaryPath !== defaults.grokBinaryPath
-                            : providerSettings.provider === "kilo"
-                              ? settings.kiloBinaryPath !== defaults.kiloBinaryPath ||
-                                settings.kiloServerUrl !== defaults.kiloServerUrl ||
-                                settings.kiloServerPassword !== defaults.kiloServerPassword
-                              : providerSettings.provider === "pi"
-                                ? settings.piBinaryPath !== defaults.piBinaryPath ||
-                                  settings.piAgentDir !== defaults.piAgentDir
-                                : settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
-                                  settings.openCodeExperimentalWebSockets !==
-                                    defaults.openCodeExperimentalWebSockets ||
-                                  settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
-                                  settings.openCodeServerPassword !==
-                                    defaults.openCodeServerPassword;
+                            : providerSettings.provider === "droid"
+                              ? settings.droidBinaryPath !== defaults.droidBinaryPath
+                              : providerSettings.provider === "kilo"
+                                ? settings.kiloBinaryPath !== defaults.kiloBinaryPath ||
+                                  settings.kiloServerUrl !== defaults.kiloServerUrl ||
+                                  settings.kiloServerPassword !== defaults.kiloServerPassword
+                                : providerSettings.provider === "pi"
+                                  ? settings.piBinaryPath !== defaults.piBinaryPath ||
+                                    settings.piAgentDir !== defaults.piAgentDir
+                                  : settings.openCodeBinaryPath !== defaults.openCodeBinaryPath ||
+                                    settings.openCodeExperimentalWebSockets !==
+                                      defaults.openCodeExperimentalWebSockets ||
+                                    settings.openCodeServerUrl !== defaults.openCodeServerUrl ||
+                                    settings.openCodeServerPassword !==
+                                      defaults.openCodeServerPassword;
                 const binaryPathValue =
                   providerSettings.binaryPathKey === "claudeBinaryPath"
                     ? claudeBinaryPath
@@ -2821,13 +2853,15 @@ function SettingsRouteView() {
                         ? geminiBinaryPath
                         : providerSettings.binaryPathKey === "grokBinaryPath"
                           ? grokBinaryPath
-                          : providerSettings.binaryPathKey === "kiloBinaryPath"
-                            ? kiloBinaryPath
-                            : providerSettings.binaryPathKey === "openCodeBinaryPath"
-                              ? openCodeBinaryPath
-                              : providerSettings.binaryPathKey === "piBinaryPath"
-                                ? piBinaryPath
-                                : codexBinaryPath;
+                          : providerSettings.binaryPathKey === "droidBinaryPath"
+                            ? droidBinaryPath
+                            : providerSettings.binaryPathKey === "kiloBinaryPath"
+                              ? kiloBinaryPath
+                              : providerSettings.binaryPathKey === "openCodeBinaryPath"
+                                ? openCodeBinaryPath
+                                : providerSettings.binaryPathKey === "piBinaryPath"
+                                  ? piBinaryPath
+                                  : codexBinaryPath;
                 const providerStatus = providerStatusByProvider.get(providerSettings.provider);
                 const showProviderUpdateStatus = providerStatus
                   ? shouldShowProviderUpdateStatus({
@@ -2984,14 +3018,17 @@ function SettingsRouteView() {
                                           ? { geminiBinaryPath: nextValue }
                                           : providerSettings.binaryPathKey === "grokBinaryPath"
                                             ? { grokBinaryPath: nextValue }
-                                            : providerSettings.binaryPathKey === "kiloBinaryPath"
-                                              ? { kiloBinaryPath: nextValue }
-                                              : providerSettings.binaryPathKey ===
-                                                  "openCodeBinaryPath"
-                                                ? { openCodeBinaryPath: nextValue }
-                                                : providerSettings.binaryPathKey === "piBinaryPath"
-                                                  ? { piBinaryPath: nextValue }
-                                                  : { codexBinaryPath: nextValue },
+                                            : providerSettings.binaryPathKey === "droidBinaryPath"
+                                              ? { droidBinaryPath: nextValue }
+                                              : providerSettings.binaryPathKey === "kiloBinaryPath"
+                                                ? { kiloBinaryPath: nextValue }
+                                                : providerSettings.binaryPathKey ===
+                                                    "openCodeBinaryPath"
+                                                  ? { openCodeBinaryPath: nextValue }
+                                                  : providerSettings.binaryPathKey ===
+                                                      "piBinaryPath"
+                                                    ? { piBinaryPath: nextValue }
+                                                    : { codexBinaryPath: nextValue },
                                   )
                                 }
                                 placeholder={providerSettings.binaryPlaceholder}

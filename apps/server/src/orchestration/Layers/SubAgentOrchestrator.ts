@@ -10,7 +10,7 @@
  * The child's workspace (`envMode`/`worktreePath`/`branch`) depends on
  * `input.workspace`:
  * - `"share"` copies `caller.workspace` verbatim so `resolveThreadWorkspaceCwd`
- *   (`@t3tools/shared/threadEnvironment`) resolves the child to the same cwd as
+ *   (`@synara/shared/threadEnvironment`) resolves the child to the same cwd as
  *   the caller (decision 5, "share parent cwd" —
  *   docs/superpowers/specs/2026-06-30-cross-model-agents-design.md §3.3/§5).
  * - `"worktree"` (Task 4.1) provisions a REAL isolated Git worktree via
@@ -57,16 +57,16 @@ import {
   type SubAgentStatus,
   type ThreadEnvironmentMode,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Deferred, Duration, Effect, Layer, Option, PubSub } from "effect";
 
-import { getDefaultModel } from "@t3tools/shared/model";
+import { getDefaultModel } from "@synara/shared/model";
 import {
   clampWaitSeconds,
   SUBAGENT_DIFF_SETTLE_SECONDS,
   SUBAGENT_MAX_LIVE_PER_ROOT,
   SUBAGENT_WAIT_MAX_SECONDS,
-} from "@t3tools/shared/subagent";
+} from "@synara/shared/subagent";
 
 import type { OrchestrationDispatchError } from "../Errors.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
@@ -113,6 +113,8 @@ function buildModelSelection(provider: ProviderKind, model: string): ModelSelect
     case "gemini":
       return { provider, model };
     case "grok":
+      return { provider, model };
+    case "droid":
       return { provider, model };
     case "kilo":
       return { provider, model };

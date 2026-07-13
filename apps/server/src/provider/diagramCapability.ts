@@ -7,7 +7,7 @@
 // Exports: MERMAID_CAPABILITY_INSTRUCTION, HTML_PREVIEW_CAPABILITY_INSTRUCTION,
 //          RENDERABLE_CAPABILITIES_INSTRUCTION, renderableCapabilitiesPreambleFor
 
-import type { ProviderKind } from "@t3tools/contracts";
+import type { ProviderKind } from "@synara/contracts";
 
 export const MERMAID_CAPABILITY_INSTRUCTION =
   "When a diagram would make your answer clearer (architecture, control/data flow, " +

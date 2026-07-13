@@ -16,7 +16,7 @@
  */
 import * as Crypto from "node:crypto";
 
-import type { ThreadId } from "@t3tools/contracts";
+import type { ThreadId } from "@synara/contracts";
 import { Effect, Layer, Option, Ref, ServiceMap } from "effect";
 
 /** Byte length of the random token payload before hex-encoding (256 bits). */

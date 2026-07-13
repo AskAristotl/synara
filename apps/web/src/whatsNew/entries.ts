@@ -22,6 +22,120 @@ import type { WhatsNewEntry } from "./logic";
 
 export const WHATS_NEW_ENTRIES: readonly WhatsNewEntry[] = [
   {
+    version: "0.5.2",
+    date: "Jul 13",
+    features: [
+      {
+        id: "droid-provider",
+        title: "Factory Droid is now a first-class provider",
+        description:
+          "Droid is now available alongside Synara's other agents, with runtime model discovery, session import, token multipliers, and resilient resume and recovery.",
+        details:
+          "Synara now connects to Factory Droid through ACP, discovers models and their switching capabilities at runtime, imports existing Droid sessions, carries context across forks and restarts, and keeps bootstrap, configuration, and turn teardown state coherent. The release also adds the Factory logo and richer Droid token reporting.",
+      },
+      {
+        id: "large-history-startup",
+        title: "Large conversation histories start reliably",
+        description:
+          "Synara now upgrades large local histories without leaving the project list stuck on its loading screen.",
+        details:
+          "The activity-sequence backfill now builds one indexed lookup instead of repeatedly scanning the entire event history. A database with more than 180,000 activities completes the recovery in seconds while preserving every project, thread, message, and activity.",
+      },
+      {
+        id: "keyboard-model-cycling",
+        title: "Switch models from the keyboard",
+        description:
+          "Use Alt+] and Alt+[ to cycle through available models without leaving the conversation.",
+        details:
+          "The shortcuts use the active provider's available model options and keep model selection quick during an ongoing workflow.",
+      },
+      {
+        id: "unfinished-task-lists",
+        title: "Unfinished task lists stay visible",
+        description:
+          "Task lists now remain in the transcript after a turn completes, making follow-up work easier to resume.",
+        details:
+          "Runtime task projections preserve unfinished items after completion while keeping finished and resumed task state consistent.",
+      },
+      {
+        id: "file-undo-chat-history",
+        title: "File undo leaves chat history intact",
+        description:
+          "Undoing an agent turn now rolls back its files without deleting the conversation that explains the change.",
+        details:
+          "Turn-scoped checkpoints restore workspace state while preserving transcript history and provider conversation state.",
+      },
+      {
+        id: "cross-platform-agent-polish",
+        title: "Smoother cross-platform agent workflows",
+        description:
+          "Codex model options, Windows launching, project folder labels, and Git status checks now behave more predictably across platforms.",
+        details:
+          "Runtime-discovered Codex reasoning efforts map correctly, the Windows CLI path forwards arguments reliably, project picker labels match the host OS, and Git status handles directories outside repositories gracefully.",
+      },
+      {
+        id: "calmer-file-change-header",
+        title: "File changes are calmer to scan",
+        description:
+          "File-change headers use a softer visual treatment, keeping active work readable without competing with the diff itself.",
+      },
+    ],
+  },
+  {
+    version: "0.5.0",
+    date: "Jul 11",
+    features: [
+      {
+        id: "synara-identity",
+        title: "Synara, all the way through",
+        description:
+          "The app now uses one identity everywhere, from its desktop installation and command line to packages, settings, diagnostics, and release artifacts.",
+        details:
+          "The desktop bundle is now com.emanueledipietro.synara, the CLI is @synara/cli with the synara command, and every first-party runtime identifier uses the Synara namespace. The 0.4.2 bridge preserves renderer state during the origin change.",
+      },
+      {
+        id: "claude-context-and-resume",
+        title: "Claude keeps context under control",
+        description:
+          "Claude sessions now report live context usage, warn before compaction, switch model and context settings in place, and resume with their safeguards intact.",
+        details:
+          "The adapter combines SDK context controls with accumulated token usage, preserves the effective context window across responses, keeps fallback reroutes pinned until you choose another model, and stores resume state without forcing unnecessary provider restarts.",
+      },
+      {
+        id: "provider-task-progress",
+        title: "Agent task progress stays visible",
+        description:
+          "Claude task tools and Codex task events now appear through one shared progress stream, so resumable work is easier to follow while it runs.",
+        details:
+          "Claude TaskCreate, TaskUpdate, TaskGet, TaskList, and TodoWrite results are normalized into the shared runtime task list and persisted in the resume cursor. Codex task events and provider summaries use the same projection, with coverage for reconnects and resumed sessions.",
+      },
+      {
+        id: "codex-stream-reliability",
+        title: "Codex reasoning and streams are easier to trust",
+        description:
+          "Codex reasoning summaries, context compaction, task updates, and noisy app-server output are handled more reliably, keeping live transcripts clearer during long turns.",
+        details:
+          "The app-server bridge now ignores non-protocol stdout safely, preserves provider-authored reasoning summaries, normalizes runtime events, and hardens resume and ingestion paths so progress is not lost between streamed updates.",
+      },
+      {
+        id: "faster-recovery",
+        title: "Chat startup and recovery are lighter",
+        description:
+          "Chat dock panels load on demand, deleted projects remain safe client tombstones, and browser profile migrations repair database sidecars transactionally instead of leaving partial state behind.",
+        details:
+          "The chat route measures LCP while deferring secondary panels, while project deletion and desktop profile repair now preserve predictable local state through reloads, retries, and interrupted migrations.",
+      },
+      {
+        id: "safer-release-updates",
+        title: "Desktop updates have stronger guardrails",
+        description:
+          "Release automation now validates compatibility-feed manifests and protects the packaged desktop from unsafe bundle swaps across update and startup paths.",
+        details:
+          "The release workflow verifies the pinned updater lane, keeps clean releases off the compatibility channel, repairs update-feed metadata, and hardens desktop startup when an app.asar swap is detected.",
+      },
+    ],
+  },
+  {
     version: "0.4.2",
     date: "Jul 9",
     features: [
@@ -1477,7 +1591,7 @@ export const WHATS_NEW_ENTRIES: readonly WhatsNewEntry[] = [
         id: "synara-home-migration",
         title: "Synara is now the default home",
         description:
-          "The app now starts from `~/.synara`, carries the Synara environment variables through the desktop and server runtime, and safely imports existing `~/.dpcode` or `~/.t3` data on first launch.",
+          "The app now starts from `~/.synara`, carries the Synara environment variables through the desktop and server runtime, and safely imports data from previous installations on first launch.",
       },
       {
         id: "desktop-platform-polish",
@@ -1840,9 +1954,9 @@ export const WHATS_NEW_ENTRIES: readonly WhatsNewEntry[] = [
       },
       {
         id: "legacy-import-recovery",
-        title: "Legacy T3 imports heal themselves",
+        title: "Legacy imports heal themselves",
         description:
-          "A new migration reconciles older imported T3 Code databases whose migration history skipped Synara schema changes, preventing missing-column crashes after import.",
+          "A new migration reconciles older imported databases whose migration history skipped required schema changes, preventing missing-column crashes after import.",
       },
       {
         id: "runtime-idle-cleanup",

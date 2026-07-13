@@ -10,8 +10,8 @@ import {
   type CursorModelOptions,
   type ProviderModelDescriptor,
   type ProviderSessionStartInput,
-} from "@t3tools/contracts";
-import { formatModelDisplayName } from "@t3tools/shared/model";
+} from "@synara/contracts";
+import { formatModelDisplayName } from "@synara/shared/model";
 import { Effect, Layer, Schema, Scope, ServiceMap } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as EffectAcpErrors from "effect-acp/errors";

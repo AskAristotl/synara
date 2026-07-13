@@ -27,7 +27,7 @@ import type {
   SubAgentWaitInput,
   ThreadEnvironmentMode,
   ThreadId,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Schema, ServiceMap } from "effect";
 import type { Effect } from "effect";
 
@@ -43,7 +43,7 @@ import type { Effect } from "effect";
  * spawn tool to a sub-agent thread, but the orchestrator enforces depth-1
  * itself too so no other caller of `spawn` can bypass it. `"concurrency-limit"`
  * (Task 5.2) is `spawn`'s SECOND check, run only once depth-1 has passed: the
- * caller already has `SUBAGENT_MAX_LIVE_PER_ROOT` (`@t3tools/shared/subagent`)
+ * caller already has `SUBAGENT_MAX_LIVE_PER_ROOT` (`@synara/shared/subagent`)
  * LIVE children -- see `isLiveChildSession` in `Layers/SubAgentOrchestrator.ts`
  * for the exact "live" predicate -- so spawning one more would exceed the
  * per-root cap; also covers an infra failure reading the caller's live-child
@@ -116,7 +116,7 @@ export class SubAgentError extends Schema.TaggedErrorClass<SubAgentError>()("Sub
  * Resolved server-side from the caller's bearer token (never client-supplied for
  * the caller's own identity). `workspace` is the caller thread's own
  * `envMode`/`worktreePath`/`branch` triple — exactly the fields
- * `resolveThreadWorkspaceCwd` (`@t3tools/shared/threadEnvironment`) needs to
+ * `resolveThreadWorkspaceCwd` (`@synara/shared/threadEnvironment`) needs to
  * resolve a cwd. The share-cwd workspace path copies these verbatim onto the
  * child thread so the child resolves to the same cwd as the caller. `canSpawn`
  * reflects the depth-1 governance flag; `spawn` (Task 5.2) enforces it as the

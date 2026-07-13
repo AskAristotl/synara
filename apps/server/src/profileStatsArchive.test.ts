@@ -5,7 +5,7 @@
 // Exports: Vitest coverage for ProfileStatsArchive.
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { MessageId, ThreadId, TurnId } from "@t3tools/contracts";
+import { MessageId, ThreadId, TurnId } from "@synara/contracts";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -53,6 +53,7 @@ const checkpointStoreTestLayer = Layer.succeed(CheckpointStore, {
   copyCheckpointRef: () => Effect.die("unused checkpoint store test method"),
   hasCheckpointRef: () => Effect.die("unused checkpoint store test method"),
   restoreCheckpoint: () => Effect.die("unused checkpoint store test method"),
+  reverseCheckpointDiff: () => Effect.die("unused checkpoint store test method"),
   diffCheckpoints: () => Effect.die("unused checkpoint store test method"),
   deleteCheckpointRefs: (input) => deleteCheckpointRefsImpl(input),
 } satisfies CheckpointStoreShape);

@@ -6,7 +6,7 @@
 // Layer: Web component
 // Exports: DevicesSettingsPanel
 
-import type { AuthClientSession } from "@t3tools/contracts";
+import type { AuthClientSession } from "@synara/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";

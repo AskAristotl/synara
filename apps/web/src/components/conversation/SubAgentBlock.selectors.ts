@@ -6,7 +6,7 @@
 //      live session status can only be read reliably from the normalized `threadShellById` /
 //      `threadSessionById` slices — the same slices ChatView.selectors.ts reads for lineage.
 
-import type { ModelSelection, ThreadId as ThreadIdType } from "@t3tools/contracts";
+import type { ModelSelection, ThreadId as ThreadIdType } from "@synara/contracts";
 
 import type { AppState } from "../../store";
 import type { ThreadSession, ThreadShell } from "../../types";

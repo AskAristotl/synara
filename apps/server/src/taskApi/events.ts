@@ -34,7 +34,7 @@ import type {
   OrchestrationThreadActivityTone,
   OrchestrationThreadPullRequest,
   ProviderApprovalDecision,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 
 export type TaskEvent =
   | {

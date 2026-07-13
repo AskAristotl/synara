@@ -1,22 +1,22 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@synara/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import {
   addPinnedMessage,
   removePinnedMessage,
   setPinnedMessageDone,
   setPinnedMessageLabel,
-} from "@t3tools/shared/pinnedMessages";
+} from "@synara/shared/pinnedMessages";
 import {
   addThreadMarker,
   removeThreadMarker,
   setThreadMarkerDone,
   setThreadMarkerLabel,
-} from "@t3tools/shared/threadMarkers";
+} from "@synara/shared/threadMarkers";
 import { Effect, Schema } from "effect";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
@@ -921,11 +921,19 @@ export function projectEvent(
           (thread.latestTurn?.turnId === payload.turnId
             ? thread.latestTurn.assistantMessageId
             : null);
-        const latestTurn =
-          isProviderDiffPlaceholderRef(payload.checkpointRef) &&
-          payload.status === "missing" &&
-          thread.latestTurn?.turnId === payload.turnId &&
-          thread.latestTurn.state === "running"
+        const previousLatestCheckpointTurnCount = thread.checkpoints.find(
+          (entry) => entry.turnId === thread.latestTurn?.turnId,
+        )?.checkpointTurnCount;
+        const preservesNewerLatestTurn =
+          payload.preserveLatestTurn === true ||
+          (previousLatestCheckpointTurnCount !== undefined &&
+            previousLatestCheckpointTurnCount > payload.checkpointTurnCount);
+        const latestTurn = preservesNewerLatestTurn
+          ? thread.latestTurn
+          : isProviderDiffPlaceholderRef(payload.checkpointRef) &&
+              payload.status === "missing" &&
+              thread.latestTurn?.turnId === payload.turnId &&
+              thread.latestTurn.state === "running"
             ? thread.latestTurn
             : {
                 turnId: payload.turnId,

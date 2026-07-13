@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   type OrchestrationProjectShell,
@@ -16,15 +17,15 @@ import {
   type OrchestrationThreadShell,
   type ProviderRuntimeEvent,
   type RuntimeMode,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Cache, Cause, Duration, Effect, Layer, Option, Ref, Stream } from "effect";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker } from "@synara/shared/DrainableWorker";
 import {
   buildSubagentIdentityDirectory,
   collectSubagentProviderThreadIds,
   extractSubagentIdentityHints,
   resolveSubagentIdentityFromDirectory,
-} from "@t3tools/shared/subagents";
+} from "@synara/shared/subagents";
 
 import {
   generatedImageMarkdown,
@@ -67,6 +68,8 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 1_024;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(60);
 const BUFFERED_TOOL_OUTPUT_BY_KEY_CACHE_CAPACITY = 2_048;
 const BUFFERED_TOOL_OUTPUT_BY_KEY_TTL = Duration.minutes(60);
+const BUFFERED_REASONING_SUMMARY_BY_KEY_CACHE_CAPACITY = 2_048;
+const BUFFERED_REASONING_SUMMARY_BY_KEY_TTL = Duration.minutes(60);
 const PENDING_GENERATED_IMAGES_CACHE_CAPACITY = 512;
 // Hot-path cache only. Turn settlement also reads durable activity records, so
 // TTL expiry or a server restart cannot discard the transcript reference.
@@ -79,13 +82,15 @@ const MAX_PENDING_GENERATED_IMAGES_PER_TURN = 32;
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const MAX_BUFFERED_PROPOSED_PLAN_CHARS = 64_000;
 const MAX_BUFFERED_TOOL_OUTPUT_CHARS = 24_000;
+const MAX_BUFFERED_REASONING_SUMMARY_CHARS = 8_000;
+const MAX_BUFFERED_REASONING_SUMMARY_PARTS = 24;
 const MAX_ACTIVITY_DATA_JSON_CHARS = 16_000;
 const MAX_ACTIVITY_DATA_STRING_CHARS = 2_000;
 const MAX_ACTIVITY_DATA_ARRAY_ITEMS = 24;
 const MAX_ACTIVITY_DATA_OBJECT_KEYS = 64;
 const ACTIVITY_DATA_TRUNCATION_MARKER = "__synaraTruncated";
 const BUFFERED_TEXT_TRUNCATION_MARKER = "... [truncated]";
-const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.SYNARA_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
 type RuntimeIngestionDomainEvent = Extract<
   OrchestrationEvent,
@@ -109,6 +114,10 @@ type ToolOutputStreamKind = "command_output" | "file_change_output";
 type BufferedToolOutput = {
   readonly text: string;
   readonly truncated: boolean;
+};
+type BufferedReasoningSummary = {
+  readonly parts: ReadonlyMap<number, string>;
+  readonly sourceEvent: Extract<ProviderRuntimeEvent, { readonly type: "content.delta" }>;
 };
 type ProviderDiffPlaceholder = {
   readonly checkpointRef: CheckpointRef;
@@ -292,6 +301,88 @@ function toolOutputBufferKey(event: ProviderRuntimeEvent): string | null {
     return null;
   }
   return [event.threadId, event.turnId ?? "no-turn", event.itemId].join(":");
+}
+
+function reasoningSummaryBufferKey(
+  event: ProviderRuntimeEvent,
+  threadId = event.threadId,
+): string | null {
+  if (event.provider !== "codex" || !event.itemId) {
+    return null;
+  }
+  if (event.type === "content.delta" && event.payload.streamKind === "reasoning_summary_text") {
+    return [threadId, event.turnId ?? "no-turn", event.itemId].join(":");
+  }
+  if (
+    (event.type === "item.started" ||
+      event.type === "item.updated" ||
+      event.type === "item.completed") &&
+    event.payload.itemType === "reasoning"
+  ) {
+    return [threadId, event.turnId ?? "no-turn", event.itemId].join(":");
+  }
+  return null;
+}
+
+function readableReasoningDetail(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.replace(/<!--[\s\S]*?-->/gu, "").trim().length === 0) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function joinedBufferedReasoningSummary(
+  summary: BufferedReasoningSummary | undefined,
+): string | undefined {
+  if (!summary) {
+    return undefined;
+  }
+  return readableReasoningDetail(
+    Array.from(summary.parts.entries())
+      .sort(([left], [right]) => left - right)
+      .map(([, text]) => text.trim())
+      .filter((text) => text.length > 0)
+      .join("\n\n"),
+  );
+}
+
+function bufferedReasoningTerminalStatus(event: ProviderRuntimeEvent): "completed" | "failed" {
+  if (event.type === "runtime.error" || event.type === "turn.aborted") {
+    return "failed";
+  }
+  if (event.type === "turn.completed") {
+    return event.payload.state === "completed" ? "completed" : "failed";
+  }
+  if (event.type === "session.exited") {
+    return event.payload.exitKind === "error" ? "failed" : "completed";
+  }
+  return "completed";
+}
+
+function withBufferedReasoningSummary(
+  event: ProviderRuntimeEvent,
+  summary: BufferedReasoningSummary | undefined,
+): ProviderRuntimeEvent {
+  if (
+    event.type !== "item.completed" ||
+    event.provider !== "codex" ||
+    event.payload.itemType !== "reasoning" ||
+    readableReasoningDetail(event.payload.detail)
+  ) {
+    return event;
+  }
+  const bufferedDetail = joinedBufferedReasoningSummary(summary);
+  if (!bufferedDetail) {
+    return event;
+  }
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      detail: bufferedDetail,
+    },
+  };
 }
 
 function hasNonEmptyString(value: unknown): boolean {
@@ -894,6 +985,36 @@ function runtimeEventToActivities(
       ? { sequence: eventWithSequence.sessionSequence }
       : {};
   })();
+  // Codex only renders completed reasoning items with a readable summary.
+  // Empty starts/completions are private/encrypted reasoning boundaries, not
+  // transcript rows. Waiting for the authoritative completion also avoids
+  // per-token activity writes and transcript height churn.
+  if (
+    event.provider === "codex" &&
+    event.type === "item.completed" &&
+    event.payload.itemType === "reasoning" &&
+    event.itemId !== undefined &&
+    readableReasoningDetail(event.payload.detail) !== undefined
+  ) {
+    const reasoningItemId = String(event.itemId);
+    const reasoningDetail = readableReasoningDetail(event.payload.detail)!;
+    return [
+      {
+        id: EventId.makeUnsafe(`provider-reasoning:${event.threadId}:${reasoningItemId}`),
+        createdAt: event.createdAt,
+        tone: "tool",
+        kind: "task.progress",
+        summary: "Reasoning trace",
+        payload: toActivityPayload({
+          ...(event.payload.status ? { status: event.payload.status } : {}),
+          detail: truncateDetail(reasoningDetail, MAX_ACTIVITY_DATA_STRING_CHARS),
+          data: { toolCallId: reasoningItemId },
+        }),
+        turnId: toTurnId(event.turnId) ?? null,
+        ...maybeSequence,
+      },
+    ];
+  }
   switch (event.type) {
     case "session.configured": {
       const payload = buildConfiguredContextWindowPayload(event);
@@ -1525,6 +1646,14 @@ const make = Effect.gen(function* () {
     timeToLive: BUFFERED_TOOL_OUTPUT_BY_KEY_TTL,
     lookup: () => Effect.succeed(undefined),
   });
+  const bufferedReasoningSummaryByKey = yield* Cache.make<
+    string,
+    BufferedReasoningSummary | undefined
+  >({
+    capacity: BUFFERED_REASONING_SUMMARY_BY_KEY_CACHE_CAPACITY,
+    timeToLive: BUFFERED_REASONING_SUMMARY_BY_KEY_TTL,
+    lookup: () => Effect.succeed(undefined),
+  });
   // Display paths of generated images completed during a still-running turn, keyed by
   // providerTurnKey. Flushed into the turn's terminal assistant message when the turn
   // settles, so the visible final row owns the image instead of collapsed narration.
@@ -1779,6 +1908,93 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+
+  const appendBufferedReasoningSummary = (
+    key: string,
+    event: Extract<ProviderRuntimeEvent, { readonly type: "content.delta" }>,
+  ) =>
+    Cache.getOption(bufferedReasoningSummaryByKey, key).pipe(
+      Effect.flatMap((existingEntry) => {
+        const summaryIndex = event.payload.summaryIndex ?? 0;
+        const delta = event.payload.delta;
+        if (
+          summaryIndex < 0 ||
+          summaryIndex >= MAX_BUFFERED_REASONING_SUMMARY_PARTS ||
+          delta.length === 0
+        ) {
+          return Effect.void;
+        }
+        const existingSummary = Option.getOrUndefined(existingEntry);
+        const parts = new Map(existingSummary?.parts ?? []);
+        const existingPart = parts.get(summaryIndex) ?? "";
+        const otherChars = Array.from(parts.entries()).reduce(
+          (total, [index, text]) => total + (index === summaryIndex ? 0 : text.length),
+          0,
+        );
+        const partLimit = Math.max(0, MAX_BUFFERED_REASONING_SUMMARY_CHARS - otherChars);
+        if (partLimit === 0) {
+          return Effect.void;
+        }
+        parts.set(summaryIndex, appendCappedBufferedText(existingPart, delta, partLimit));
+        return Cache.set(bufferedReasoningSummaryByKey, key, {
+          parts,
+          sourceEvent: event,
+        });
+      }),
+    );
+
+  const takeBufferedReasoningSummary = (key: string) =>
+    Cache.getOption(bufferedReasoningSummaryByKey, key).pipe(
+      Effect.flatMap((existingEntry) =>
+        Cache.invalidate(bufferedReasoningSummaryByKey, key).pipe(
+          Effect.as(Option.getOrUndefined(existingEntry)),
+        ),
+      ),
+    );
+
+  const settleBufferedReasoningSummaries = (
+    threadId: ThreadId,
+    terminalEvent: ProviderRuntimeEvent,
+    turnId?: TurnId,
+  ) => {
+    const prefix = turnId ? `${threadId}:${turnId}:` : `${threadId}:`;
+    return Cache.keys(bufferedReasoningSummaryByKey).pipe(
+      Effect.flatMap((keys) =>
+        Effect.forEach(
+          Array.from(keys).filter((key) => key.startsWith(prefix)),
+          (key) =>
+            takeBufferedReasoningSummary(key).pipe(
+              Effect.flatMap((summary) => {
+                const detail = joinedBufferedReasoningSummary(summary);
+                if (!summary || !detail || !summary.sourceEvent.itemId) {
+                  return Effect.void;
+                }
+                const completionEvent: ProviderRuntimeEvent = {
+                  ...summary.sourceEvent,
+                  eventId: EventId.makeUnsafe(
+                    `${terminalEvent.eventId}:reasoning:${summary.sourceEvent.itemId}`,
+                  ),
+                  threadId,
+                  type: "item.completed",
+                  payload: {
+                    itemType: "reasoning",
+                    status: bufferedReasoningTerminalStatus(terminalEvent),
+                    title: "Reasoning",
+                    detail,
+                  },
+                };
+                return Effect.forEach(
+                  runtimeEventToActivities(completionEvent),
+                  (activity) => dispatchActivityUpdate(completionEvent, threadId, activity),
+                  { concurrency: 1 },
+                ).pipe(Effect.asVoid);
+              }),
+            ),
+          { concurrency: 1 },
+        ).pipe(Effect.asVoid),
+      ),
+    );
+  };
 
   const clearAssistantMessageState = (messageId: MessageId) =>
     clearBufferedAssistantText(messageId);
@@ -2672,6 +2888,16 @@ const make = Effect.gen(function* () {
         yield* appendBufferedToolOutput(toolOutputKey, event.payload.delta);
       }
 
+      const reasoningSummaryKey = reasoningSummaryBufferKey(event, thread.id);
+      if (
+        reasoningSummaryKey &&
+        event.type === "content.delta" &&
+        event.payload.streamKind === "reasoning_summary_text" &&
+        event.payload.delta.length > 0
+      ) {
+        yield* appendBufferedReasoningSummary(reasoningSummaryKey, event);
+      }
+
       const assistantDelta =
         event.type === "content.delta" && event.payload.streamKind === "assistant_text"
           ? event.payload.delta
@@ -3019,16 +3245,33 @@ const make = Effect.gen(function* () {
       }
 
       const activityEvent =
-        event.type === "item.completed" && toolOutputKey
-          ? withBufferedToolOutputData(event, yield* takeBufferedToolOutput(toolOutputKey))
-          : event.type === "item.updated" && toolOutputKey
-            ? withBufferedToolOutputData(event, yield* getBufferedToolOutput(toolOutputKey))
-            : event;
+        event.type === "item.completed" && reasoningSummaryKey
+          ? withBufferedReasoningSummary(
+              event,
+              yield* takeBufferedReasoningSummary(reasoningSummaryKey),
+            )
+          : event.type === "item.completed" && toolOutputKey
+            ? withBufferedToolOutputData(event, yield* takeBufferedToolOutput(toolOutputKey))
+            : event.type === "item.updated" && toolOutputKey
+              ? withBufferedToolOutputData(event, yield* getBufferedToolOutput(toolOutputKey))
+              : event;
       yield* Effect.forEach(
         runtimeEventToActivities(activityEvent),
         (activity) => dispatchActivityUpdate(activityEvent, thread.id, activity),
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
+
+      if (event.type === "turn.completed" || event.type === "turn.aborted") {
+        yield* settleBufferedReasoningSummaries(thread.id, event, toTurnId(event.turnId));
+      } else if (event.type === "session.exited") {
+        yield* settleBufferedReasoningSummaries(thread.id, event);
+      } else if (event.type === "runtime.error") {
+        yield* settleBufferedReasoningSummaries(
+          thread.id,
+          event,
+          eventTurnId ?? activeTurnId ?? undefined,
+        );
+      }
     });
 
   const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>

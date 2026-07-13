@@ -24,7 +24,7 @@ import {
   type WsPush,
   type WsPushChannel,
   type WsPushMessage,
-} from "@t3tools/contracts";
+} from "@synara/contracts";
 import { Cause, Data, Effect, Exit, Layer, ManagedRuntime, Schedule, Scope, Stream } from "effect";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
@@ -337,6 +337,7 @@ export class WsTransport {
   }
 
   dispose() {
+    if (this.disposed) return;
     this.disposed = true;
     this.setState("disposed");
     this.reconnectWake?.();
@@ -351,7 +352,12 @@ export class WsTransport {
     const ready = this.sessionReady;
     void ready
       ?.then(({ runtime, clientScope }) =>
-        runtime.runPromise(Scope.close(clientScope, Exit.void)).finally(() => runtime.dispose()),
+        runtime
+          .runPromise(Scope.close(clientScope, Exit.void))
+          .catch(() => undefined)
+          .finally(() => {
+            void runtime.dispose().catch(() => undefined);
+          }),
       )
       .catch(() => undefined);
   }
@@ -466,7 +472,12 @@ export class WsTransport {
 
     void oldReady
       ?.then(({ runtime, clientScope }) =>
-        runtime.runPromise(Scope.close(clientScope, Exit.void)).finally(() => runtime.dispose()),
+        runtime
+          .runPromise(Scope.close(clientScope, Exit.void))
+          .catch(() => undefined)
+          .finally(() => {
+            void runtime.dispose().catch(() => undefined);
+          }),
       )
       .catch(() => undefined);
 

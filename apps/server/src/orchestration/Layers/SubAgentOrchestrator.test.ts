@@ -19,8 +19,8 @@ import {
   SubAgentWaitInput,
   ThreadId,
   TurnId,
-} from "@t3tools/contracts";
-import { resolveThreadWorkspaceCwd } from "@t3tools/shared/threadEnvironment";
+} from "@synara/contracts";
+import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Layer, ManagedRuntime, Option, PubSub, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";

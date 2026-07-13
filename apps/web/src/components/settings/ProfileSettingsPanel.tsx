@@ -7,7 +7,7 @@
 
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { type ProfileStats, type ProfileTokenStats, type ProviderKind } from "@t3tools/contracts";
+import { type ProfileStats, type ProfileTokenStats, type ProviderKind } from "@synara/contracts";
 import {
   serverProfileStatsQueryOptions,
   serverProfileTokenStatsQueryOptions,
@@ -342,6 +342,8 @@ function formatProviderLabel(provider: ProviderKind): string {
       return "Gemini";
     case "grok":
       return "Grok";
+    case "droid":
+      return "Droid";
     case "kilo":
       return "Kilo";
     case "opencode":
