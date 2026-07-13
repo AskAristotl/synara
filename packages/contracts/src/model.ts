@@ -549,6 +549,32 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
         contextWindowTokens: 200_000,
       },
     },
+    // OpenAI model served through the Claude Code harness via a local
+    // Anthropic-compatible gateway (CLIProxyAPI). Only usable when the server
+    // runs with ANTHROPIC_BASE_URL pointing at the gateway; the effort values
+    // are Claude API efforts, which the gateway maps 1:1 onto Sol's reasoning
+    // levels (Light/Medium/High/Extra High/Ultra).
+    {
+      slug: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      capabilities: {
+        reasoningEffortLevels: [
+          claudeApiEffortOption("low", "Light"),
+          claudeApiEffortOption("medium", "Medium"),
+          claudeApiEffortOption("high", "High", { isDefault: true }),
+          claudeApiEffortOption("xhigh", "Extra High"),
+          {
+            ...claudeApiEffortOption("max", "Ultra"),
+            description: "Consumes usage limits faster",
+          },
+        ],
+        supportsFastMode: false,
+        supportsThinkingToggle: false,
+        promptInjectedEffortLevels: [],
+        contextWindowOptions: [],
+        contextWindowTokens: 372_000,
+      },
+    },
   ],
   gemini: [
     {

@@ -9,6 +9,7 @@ apps/*/dist
 packages/*/dist
 .env
 .env.local
+.env.gateway
 build/
 .logs/
 release/

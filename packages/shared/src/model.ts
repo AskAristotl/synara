@@ -784,6 +784,32 @@ function sameClaudeRequestedSpawnOptions(
   );
 }
 
+// Extra Claude Code subprocess env fixed at spawn for specific claudeAgent
+// models. gpt-5.6-sol is an OpenAI model served through an Anthropic-compatible
+// gateway, so the CLI needs explicit opt-ins its Claude defaults would
+// otherwise gate: subagents must stay on Sol instead of falling back to a
+// Claude model, effort must be sent for a non-Anthropic model id, and tool-use
+// concurrency/tool-search are tuned to what Sol handles reliably.
+const CLAUDE_MODEL_SPAWN_ENV: Partial<Record<ModelSlug, Readonly<Record<string, string>>>> = {
+  "gpt-5.6-sol": {
+    CLAUDE_CODE_SUBAGENT_MODEL: "gpt-5.6-sol",
+    CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: "1",
+    CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "3",
+    ENABLE_TOOL_SEARCH: "false",
+  },
+};
+
+/**
+ * Model-specific env for the Claude subprocess, fixed at spawn. Returns a
+ * stable reference per model so callers can compare by identity.
+ */
+export function getClaudeModelSpawnEnv(
+  model: string | null | undefined,
+): Readonly<Record<string, string>> | undefined {
+  const slug = normalizeModelSlug(model, "claudeAgent");
+  return slug === null ? undefined : CLAUDE_MODEL_SPAWN_ENV[slug];
+}
+
 // Mirrors the spawn-time option derivation in the Claude adapter's startSession:
 // only these inputs are fixed at subprocess spawn (query `effort` + `settings`).
 // Model and context window switch in-session via `setModel`.
@@ -822,6 +848,11 @@ export function claudeSelectionRequiresRestart(
     return false;
   }
   if (previous.provider !== "claudeAgent") {
+    return true;
+  }
+  if (getClaudeModelSpawnEnv(previous.model) !== getClaudeModelSpawnEnv(next.model)) {
+    // Subprocess env is fixed at spawn, so crossing into or out of a model
+    // with dedicated spawn env (e.g. gpt-5.6-sol) cannot use setModel.
     return true;
   }
   if (previous.model !== next.model && sameClaudeRequestedSpawnOptions(previous, next)) {

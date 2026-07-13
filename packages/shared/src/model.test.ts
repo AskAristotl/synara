@@ -711,6 +711,23 @@ describe("claudeSelectionRequiresRestart", () => {
     ).toBe(false);
   });
 
+  it("restarts when a model switch crosses a model-specific spawn env boundary", () => {
+    // gpt-5.6-sol carries dedicated subprocess env (gateway opt-ins) that is
+    // fixed at spawn, so setModel alone cannot apply or clear it.
+    expect(
+      claudeSelectionRequiresRestart(
+        selection("claude-fable-5", { effort: "high" }),
+        selection("gpt-5.6-sol", { effort: "high" }),
+      ),
+    ).toBe(true);
+    expect(
+      claudeSelectionRequiresRestart(
+        selection("gpt-5.6-sol", { effort: "high" }),
+        selection("claude-fable-5", { effort: "high" }),
+      ),
+    ).toBe(true);
+  });
+
   it("does not restart when a model switch carries an unsupported thinking override", () => {
     expect(
       claudeSelectionRequiresRestart(

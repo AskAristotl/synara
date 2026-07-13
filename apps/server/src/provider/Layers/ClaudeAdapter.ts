@@ -57,6 +57,7 @@ import {
 } from "@synara/contracts";
 import {
   applyClaudePromptEffortPrefix,
+  getClaudeModelSpawnEnv,
   getDefaultAutoCompactWindow,
   getDefaultModel,
   getEffectiveClaudeCodeEffort,
@@ -3718,7 +3719,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           })(),
           includePartialMessages: true,
           canUseTool,
-          env: claudeSdkEnv,
+          // Model-specific spawn env (e.g. gpt-5.6-sol gateway opt-ins) under
+          // the process env, so explicit user overrides keep precedence.
+          env: { ...getClaudeModelSpawnEnv(effectiveClaudeModel), ...claudeSdkEnv },
           ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         };
 
